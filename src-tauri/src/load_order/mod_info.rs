@@ -574,11 +574,46 @@ pub fn get_mod_info_version_score(path: &Path) -> u32 {
     1000
 }
 
+/// Raw discovery result: both the legacy (id-collapsed) view and the full
+/// un-collapsed view, so callers that need to see duplicate installs can opt in
+/// without changing the behavior every existing call site depends on.
+pub struct DiscoveredMods {
+    /// Exactly what `scan_all_installed_mods` has always returned: one entry
+    /// per mod id, in resolved load order, remaining mods sorted alphabetically.
+    pub ordered: Vec<ModManifest>,
+    /// Every install found on disk, duplicates included, in discovery order
+    /// (Workshop first, then local mods folders). This is what the conflict
+    /// detector needs: two copies of the same mod id must both be visible.
+    pub all_installs: Vec<ModManifest>,
+}
+
 /// Scans all subscribed Workshop & local mods recursively without depth limits.
 /// Preserves exact ModListData.ini load order for active mods, and sorts remaining mods deterministically.
 pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
+    discover_installed_mods(paths).ordered
+}
+
+/// Same scan as [`scan_all_installed_mods`] but WITHOUT collapsing manifests by
+/// id, so a mod installed twice (e.g. once from the Workshop and once in the
+/// local `mods` folder) yields two entries. Deterministic: discovery order is
+/// preserved, and `enabled` is mirrored from the collapsed view.
+///
+/// Used by the conflict engine (`conflicts::detect_duplicate_mods`), which is
+/// permanently blind if the id-keyed `HashMap` collapse happens first.
+pub fn scan_all_installed_mods_list(paths: &StudioPaths) -> Vec<ModManifest> {
+    discover_installed_mods(paths).all_installs
+}
+
+fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
     let mut all_mods_map: std::collections::HashMap<String, ModManifest> = std::collections::HashMap::new();
     let mut mod_scores: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // Highest-scoring version dir already recorded per mod id, so a single
+    // install with both `mod.info` and `42/mod.info` is not mistaken for a
+    // duplicate install. Kept separate per source so that the SAME mod found
+    // in both Workshop and local mods IS reported twice.
+    let mut workshop_list: Vec<ModManifest> = Vec::new();
+    let mut local_best_score: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut local_list: Vec<ModManifest> = Vec::new();
 
     // 1. Scan Steam Workshop mods (content/108600/) with depth 8
     let workshop_path = Path::new(&paths.workshop_dir);
@@ -645,6 +680,7 @@ pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
                         }
                     }
                     mod_scores.insert(manifest.id.clone(), new_score);
+                    workshop_list.push(manifest.clone());
                     all_mods_map.insert(manifest.id.clone(), manifest);
                 }
             }
@@ -727,6 +763,19 @@ pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
                             if manifest.icon_path.is_none() {
                                 manifest.icon_path = existing.icon_path.clone();
                             }
+                        }
+
+                        // Un-collapsed list: keep the highest-scoring version dir
+                        // per id *within local folders only*, so a second install of
+                        // the same mod (Workshop vs local) stays visible as a duplicate.
+                        let local_score = get_mod_info_version_score(entry.path());
+                        let record = match local_best_score.get(&manifest.id) {
+                            Some(prev) => local_score > *prev,
+                            None => true,
+                        };
+                        if record {
+                            local_best_score.insert(manifest.id.clone(), local_score);
+                            local_list.push(manifest.clone());
                         }
 
                         all_mods_map.insert(manifest.id.clone(), manifest);
@@ -890,7 +939,27 @@ pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
 
     result_mods.extend(remaining_mods);
 
-    result_mods
+    // Un-collapsed view: Workshop installs first, then local ones. `WalkDir`
+    // gives no cross-platform order guarantee, so sort for determinism.
+    let mut all_installs: Vec<ModManifest> = workshop_list;
+    all_installs.extend(local_list);
+    all_installs.sort_by(|a, b| {
+        a.id.to_lowercase()
+            .cmp(&b.id.to_lowercase())
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    // `enabled` is resolved in the collapsed view only; mirror it back so the
+    // diagnostics engine sees the same activation state the UI shows.
+    for m in all_installs.iter_mut() {
+        if let Some(canonical) = result_mods.iter().find(|c| c.id == m.id) {
+            m.enabled = canonical.enabled;
+        }
+    }
+
+    DiscoveredMods {
+        ordered: result_mods,
+        all_installs,
+    }
 }
 
 pub fn extract_workshop_id_from_path(path: &Path) -> Option<String> {

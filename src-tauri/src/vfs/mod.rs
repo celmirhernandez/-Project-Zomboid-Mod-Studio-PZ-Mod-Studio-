@@ -37,6 +37,45 @@ pub struct VfsConflictRaw {
     pub auto_ast_output: String,
     pub is_identical_noise: bool,
     pub status: Option<String>,
+    /// "Error" | "Warning" | "Info" — how much this collision actually matters.
+    pub severity: String,
+    /// One plain-language sentence explaining the collision. No jargon.
+    pub cause: String,
+}
+
+/// Pure classifier for a VFS file collision. Total: any `(count, identical)`
+/// pair yields a valid answer, with no unwrap, expect or panic.
+///
+/// - 0 or 1 competing mod -> nothing is actually colliding.
+/// - Identical copies -> harmless duplication, load order cannot change anything.
+/// - Differing copies -> only the last mod in load order is really used.
+pub fn classify_vfs_conflict(competing_mod_count: usize, identical: bool) -> (&'static str, String) {
+    match competing_mod_count {
+        0 => (
+            "Info",
+            "No mod provides this file.".to_string(),
+        ),
+        1 => (
+            "Info",
+            "Only one mod provides this file.".to_string(),
+        ),
+        _ if identical => (
+            "Info",
+            format!(
+                "{} mods contain an identical copy of this file, so load order cannot change \
+                 behaviour.",
+                competing_mod_count
+            ),
+        ),
+        _ => (
+            "Error",
+            format!(
+                "{} mods define different content for the same file; only the last one in load \
+                 order is actually used.",
+                competing_mod_count
+            ),
+        ),
+    }
 }
 
 /// Auto-detects default Project Zomboid installation and user data paths across drives.
@@ -321,6 +360,9 @@ pub fn scan_conflicts(paths: &StudioPaths) -> Vec<VfsConflictRaw> {
                     (auto_ast_output.clone(), None)
                 };
 
+                let (severity, cause) =
+                    classify_vfs_conflict(unique_mods.len(), is_identical_noise);
+
                 conflicts.push(VfsConflictRaw {
                     id: format!("conflict_{}", id_counter),
                     relative_path: rel_path,
@@ -335,6 +377,8 @@ pub fn scan_conflicts(paths: &StudioPaths) -> Vec<VfsConflictRaw> {
                     auto_ast_output,
                     is_identical_noise,
                     status,
+                    severity: severity.to_string(),
+                    cause,
                 });
 
                 id_counter += 1;
@@ -446,4 +490,83 @@ fn extract_local_mod_id(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_vfs_conflict;
+
+    #[test]
+    fn classify_no_mods_is_info_and_total() {
+        let (severity, cause) = classify_vfs_conflict(0, false);
+        assert_eq!(severity, "Info");
+        assert!(!cause.is_empty());
+    }
+
+    #[test]
+    fn classify_no_mods_identical_is_still_info() {
+        let (severity, _cause) = classify_vfs_conflict(0, true);
+        assert_eq!(severity, "Info");
+    }
+
+    #[test]
+    fn classify_single_mod_is_info_regardless_of_identical() {
+        let (severity, cause) = classify_vfs_conflict(1, false);
+        assert_eq!(severity, "Info");
+        assert!(cause.contains("Only one mod"));
+        assert!(cause.to_lowercase().contains("this file"));
+    }
+
+    #[test]
+    fn classify_single_mod_identical_is_info() {
+        let (severity, cause) = classify_vfs_conflict(1, true);
+        assert_eq!(severity, "Info");
+        assert!(cause.contains("Only one mod"));
+    }
+
+    #[test]
+    fn classify_two_identical_mods_is_info() {
+        let (severity, cause) = classify_vfs_conflict(2, true);
+        assert_eq!(severity, "Info");
+        assert!(cause.contains("2 mods"));
+        assert!(cause.contains("identical"));
+        assert!(cause.contains("load order cannot change"));
+    }
+
+    #[test]
+    fn classify_two_differing_mods_is_error() {
+        let (severity, cause) = classify_vfs_conflict(2, false);
+        assert_eq!(severity, "Error");
+        assert!(cause.contains("2 mods"));
+        assert!(cause.contains("different content"));
+        assert!(cause.contains("last one in load order"));
+    }
+
+    #[test]
+    fn classify_three_identical_mods_is_info_and_counts_them() {
+        let (severity, cause) = classify_vfs_conflict(3, true);
+        assert_eq!(severity, "Info");
+        assert!(cause.contains("3 mods"));
+        assert!(!cause.contains("2 mods"));
+    }
+
+    #[test]
+    fn classify_five_differing_mods_is_error_and_counts_them() {
+        let (severity, cause) = classify_vfs_conflict(5, false);
+        assert_eq!(severity, "Error");
+        assert!(cause.contains("5 mods"));
+        assert!(cause.contains("different content"));
+    }
+
+    #[test]
+    fn classify_never_panics_across_a_wide_input_range() {
+        for n in 0..64usize {
+            for identical in [false, true] {
+                let (severity, cause) = classify_vfs_conflict(n, identical);
+                assert!(severity == "Info" || severity == "Error" || severity == "Warning");
+                assert!(!cause.is_empty());
+                assert!(!cause.ends_with(' '));
+            }
+        }
+    }
 }

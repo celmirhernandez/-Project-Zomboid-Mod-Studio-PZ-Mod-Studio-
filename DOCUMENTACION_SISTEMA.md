@@ -237,6 +237,7 @@ Ubicación del código:
 - `list_installed_mods`: Lista todos los mods instalados locales y de Workshop.
 - `sort_mod_load_order`: Ejecuta ordenamiento topológico y reporta dependencias.
 - `scan_mod_conflicts`: Escanea el VFS y detecta colisiones de archivos.
+- `scan_mod_diagnostics`: Ejecuta el motor de conflictos y devuelve diagnósticos en lenguaje claro (dependencias faltantes, pares incompatibles, ciclos, duplicados, versionMin inválidas).
 - `list_mod_profiles`: Lista todos los perfiles de mods guardados.
 - `create_mod_profile`: Crea un nuevo perfil con orden de carga independiente.
 - `activate_mod_profile`: Activa un perfil y lo escribe en el juego.

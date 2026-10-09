@@ -59,8 +59,8 @@ Speaks MCP 2024-11-05, JSON-RPC 2.0 over stdio. Client config:
   "command": "C:\\Path\\To\\Project-Zomboid-Mod-Studio-PZ-Mod-Studio-\\pz-mcp-server.exe", "args": [] } } }
 ```
 
-22 tools (`src-tauri/src/mcp/tools.rs` — trust this file over any doc listing):
-- Paths/mods: `get_studio_paths`, `list_installed_mods`, `sort_mod_load_order`, `scan_mod_conflicts`
+23 tools (`src-tauri/src/mcp/tools.rs` — trust this file over any doc listing):
+- Paths/mods: `get_studio_paths`, `list_installed_mods`, `sort_mod_load_order`, `scan_mod_conflicts`, `scan_mod_diagnostics`
 - Profiles: `list_mod_profiles`, `create_mod_profile`, `activate_mod_profile`
 - Game/IPC: `get_game_status`, `launch_game`, `terminate_game`, `send_game_ipc_command`, `get_game_ipc_response`, `install_bridge_companion_mod`
 - Logs/diagnostics: `get_monitor_logs`, `list_available_logs`, `read_log_file`, `get_crash_diagnostics`

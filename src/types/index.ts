@@ -23,6 +23,10 @@ export interface VfsConflict {
   id: string;
   relative_path: string; // e.g. "media/lua/client/ISUI/ISInventoryPane.lua"
   file_type: FileType;
+  /** Plain-language reason this file collides (populated by the Rust scanner). */
+  cause?: string;
+  /** Free-form severity label reported by the Rust scanner, e.g. "Warning". */
+  severity?: string;
   start_line?: number; // e.g. 1
   end_line?: number;   // e.g. 20
   conflict_line?: number; // e.g. 5
@@ -105,6 +109,52 @@ export interface DependencyIssue {
   issue_type: 'MISSING' | 'WRONG_ORDER' | 'CIRCULAR';
   severity: 'WARNING' | 'ERROR';
   description: string;
+}
+
+/**
+ * Cross-mod diagnostic reported by the Rust `scan_mod_diagnostics_cmd` command.
+ * NOTE: the Rust structs carry no `serde(rename_all)`, so every field arrives
+ * from IPC in snake_case exactly as declared here.
+ */
+/**
+ * Severity as it arrives on the wire.
+ *
+ * NOTE: Rust `Severity` is `#[serde(rename_all = "UPPERCASE")]`, so the raw IPC
+ * value is "ERROR" / "WARNING" / "INFO". `TauriService.scanModDiagnostics`
+ * normalizes those to Title Case ("Error" / "Warning" / "Info") case-insensitively,
+ * which is the form this type describes. Do not compare raw payloads against
+ * Title Case strings.
+ *
+ * (The separate `VfsConflict.severity` string is a different source — the Rust
+ * `classify_vfs_conflict` returns Title Case there — hence the normalization.)
+ */
+export type DiagnosticSeverity = 'Error' | 'Warning' | 'Info';
+
+/** Known diagnostic kinds. Unknown future kinds still render (string fallback). */
+export type DiagnosticKind =
+  | 'MISSING_DEPENDENCY'
+  | 'LOAD_ORDER_VIOLATION'
+  | 'CIRCULAR_DEPENDENCY'
+  | 'INCOMPATIBLE_PAIR'
+  | 'DUPLICATE_MOD'
+  | 'GAME_VERSION_MISMATCH'
+  | 'REQUIRED_LIBRARY_VERSION'
+  | 'MALFORMED_VERSION_DIRECTIVE'
+  | 'DATA_KEY_COLLISION'
+  | 'ASSET_COLLISION'
+  | 'FILE_COLLISION'
+  | (string & {});
+
+export interface ModDiagnostic {
+  kind: DiagnosticKind;
+  severity: DiagnosticSeverity;
+  title: string;
+  cause: string;
+  mod_ids: string[];
+  related_mod_ids: string[];
+  file_path: string | null;
+  detail: string | null;
+  suggestion: string | null;
 }
 
 export interface ModProfile {

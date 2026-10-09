@@ -1,6 +1,6 @@
 use super::protocol::{McpTool, ToolCallResult, ToolContent};
 use crate::diff_engine::lua::{three_way_merge_lua, validate_lua_syntax};
-use crate::load_order::mod_info::scan_all_installed_mods;
+use crate::load_order::mod_info::{scan_all_installed_mods, scan_all_installed_mods_list};
 use crate::load_order::topological_sort::sort_dependencies_topologically;
 use crate::instance_manager::{activate_instance, create_instance, list_instances};
 use crate::patch_generator::{get_master_patch_status, list_merged_packages, save_draft_resolution};
@@ -166,6 +166,18 @@ pub fn get_available_tools() -> Vec<McpTool> {
             }),
         },
         McpTool {
+            name: "scan_mod_diagnostics".to_string(),
+            description: "Runs the plain-language conflict engine over every installed mod and returns user-readable diagnostics: missing dependencies, incompatible pairs, circular dependencies, duplicate installs, and unsafe version lines. Each item carries a severity, a human-readable cause, and a suggested fix.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pz_install_dir": { "type": "string" },
+                    "user_zomboid_dir": { "type": "string" },
+                    "workshop_dir": { "type": "string" }
+                }
+            }),
+        },
+        McpTool {
             name: "validate_lua_syntax".to_string(),
             description: "Validates Lua code syntax using full_moon AST parser, returning precise line, column, and syntax error messages if invalid.".to_string(),
             input_schema: json!({
@@ -304,6 +316,7 @@ pub fn execute_tool(name: &str, args: Value) -> ToolCallResult {
         "list_installed_mods" => handle_list_installed_mods(args),
         "sort_mod_load_order" => handle_sort_mod_load_order(args),
         "scan_mod_conflicts" => handle_scan_mod_conflicts(args),
+        "scan_mod_diagnostics" => handle_scan_mod_diagnostics(args),
         "validate_lua_syntax" => handle_validate_lua_syntax(args),
         "merge_lua_scripts" => handle_merge_lua_scripts(args),
         "get_master_patch_status" => handle_get_master_patch_status(args),
@@ -555,6 +568,37 @@ fn handle_scan_mod_conflicts(args: Value) -> ToolCallResult {
             text: serde_json::to_string_pretty(&json!({
                 "total_vfs_conflicts": conflicts.len(),
                 "conflicts": conflicts
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+        }],
+        is_error: false,
+    }
+}
+
+fn handle_scan_mod_diagnostics(args: Value) -> ToolCallResult {
+    let paths = resolve_paths(&args);
+    let manifests = scan_all_installed_mods_list(&paths);
+    let diagnostics = crate::conflicts::analyze(&manifests);
+
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::conflicts::Severity::Error)
+        .count();
+    let warnings = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::conflicts::Severity::Warning)
+        .count();
+    let infos = diagnostics.len() - errors - warnings;
+
+    ToolCallResult {
+        content: vec![ToolContent {
+            content_type: "text".to_string(),
+            text: serde_json::to_string_pretty(&json!({
+                "total_mods_scanned": manifests.len(),
+                "errors": errors,
+                "warnings": warnings,
+                "infos": infos,
+                "diagnostics": diagnostics
             }))
             .unwrap_or_else(|e| format!("Error: {}", e)),
         }],

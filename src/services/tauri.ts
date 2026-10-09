@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { StudioPathsUI } from '../components/settings/SettingsModule';
-import { VfsConflict, ModInfo, TranslatedErrorCard, DedicatedServerStatus, ConnectedPlayer, ServerQuickSettings, PZServerConfig } from '../types';
+import { VfsConflict, ModInfo, TranslatedErrorCard, DedicatedServerStatus, ConnectedPlayer, ServerQuickSettings, PZServerConfig, ModDiagnostic, DiagnosticSeverity } from '../types';
 
 export interface LuaSyntaxResult {
   is_valid: boolean;
@@ -175,6 +175,8 @@ export const TauriService = {
         id: c.id,
         relative_path: c.relative_path,
         file_type: c.file_type,
+        cause: c.cause,
+        severity: c.severity,
         start_line: c.start_line ?? 1,
         end_line: c.end_line ?? 10,
         conflict_line: c.conflict_line ?? 1,
@@ -747,5 +749,40 @@ export const TauriService = {
     activeModIds: string[]
   ): Promise<void> => {
     return await invoke('save_master_load_order', { userZomboidDir, loadOrder, activeModIds });
+  },
+
+  /**
+   * Scans the active mod list for cross-mod problems (duplicate ids, dependency
+   * cycles, incompatible pairs, shared ModData keys, malformed version directives...).
+   *
+   * Unlike scanConflicts this NEVER swallows failures: it logs and rethrows so the
+   * UI can render a real error state instead of a fake "nothing found" empty state.
+   */
+  scanModDiagnostics: async (userZomboidDir: string): Promise<ModDiagnostic[]> => {
+    try {
+      const raw = await invoke<any[]>('scan_mod_diagnostics_cmd', { userZomboidDir });
+      if (!raw) return [];
+      if (!Array.isArray(raw)) {
+        throw new Error('scan_mod_diagnostics_cmd returned a malformed payload (expected an array).');
+      }
+
+      const SEVERITIES: DiagnosticSeverity[] = ['Error', 'Warning', 'Info'];
+
+      return raw.map((d) => ({
+        kind: String(d.kind ?? 'UNKNOWN'),
+        // Rust enum is capitalized; normalize defensively so an unexpected casing never blanks the UI.
+        severity: (SEVERITIES.find((s) => s.toLowerCase() === String(d.severity ?? '').toLowerCase()) ?? 'Info'),
+        title: String(d.title ?? 'Untitled diagnostic'),
+        cause: String(d.cause ?? ''),
+        mod_ids: Array.isArray(d.mod_ids) ? d.mod_ids.map(String) : [],
+        related_mod_ids: Array.isArray(d.related_mod_ids) ? d.related_mod_ids.map(String) : [],
+        file_path: d.file_path ?? null,
+        detail: d.detail ?? null,
+        suggestion: d.suggestion ?? null,
+      }));
+    } catch (err) {
+      console.error('Mod diagnostics scan failed:', err);
+      throw err;
+    }
   },
 };

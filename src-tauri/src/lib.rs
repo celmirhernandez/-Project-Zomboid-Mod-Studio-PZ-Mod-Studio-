@@ -13,7 +13,7 @@ use diff_engine::lua::{three_way_merge_lua, validate_lua_syntax, LuaSyntaxCheckR
 use diff_engine::pz_scripts::{merge_pz_data_scripts, PzScriptMergeResult};
 use instance_manager::{activate_instance, create_instance, delete_instance, list_instances, save_master_load_order, update_instance};
 use load_order::ini_parser::{read_mod_list_ini, write_mod_list_ini, ModListData};
-use load_order::mod_info::{scan_all_installed_mods, ModManifest};
+use load_order::mod_info::{scan_all_installed_mods, scan_all_installed_mods_list, ModManifest};
 use load_order::topological_sort::{sort_dependencies_topologically, DependencyAnalysisResult};
 use patch_generator::{generate_master_patch, MasterPatchRequest, MasterPatchResult};
 use preset_manager::{check_missing_preset_mods, export_preset_file, import_preset_file};
@@ -77,6 +77,24 @@ fn scan_all_installed_mods_cmd(paths: StudioPaths) -> Vec<ModManifest> {
 #[tauri::command]
 fn sort_mod_dependencies_cmd(manifests: Vec<ModManifest>) -> DependencyAnalysisResult {
     sort_dependencies_topologically(&manifests)
+}
+
+/// Runs the pure-logic conflict engine over every install found on disk,
+/// WITHOUT collapsing manifests by id, so duplicate installs are visible.
+#[tauri::command]
+fn scan_mod_diagnostics_cmd(user_zomboid_dir: String) -> Vec<conflicts::ModDiagnostic> {
+    let mut paths = auto_detect_paths();
+    if !user_zomboid_dir.trim().is_empty() {
+        paths.user_zomboid_dir = user_zomboid_dir.clone();
+        paths.mod_list_ini_path = std::path::Path::new(&user_zomboid_dir)
+            .join("mods")
+            .join("ModListData.ini")
+            .to_string_lossy()
+            .to_string();
+    }
+    let paths = validate_paths(paths);
+    let manifests = scan_all_installed_mods_list(&paths);
+    conflicts::analyze(&manifests)
 }
 
 #[tauri::command]
@@ -310,6 +328,7 @@ pub fn run() {
             read_mod_list_ini_cmd,
             write_mod_list_ini_cmd,
             scan_all_installed_mods_cmd,
+            scan_mod_diagnostics_cmd,
             sort_mod_dependencies_cmd,
             launch_sandbox_cmd,
             generate_master_patch_cmd,

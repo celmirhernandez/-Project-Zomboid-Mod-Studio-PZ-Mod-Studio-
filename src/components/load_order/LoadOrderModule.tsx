@@ -1,6 +1,7 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { ModInfo, ModPreset, MissingModsReport } from '../../types';
 import { StudioPathsUI } from '../settings/SettingsModule';
+import { ConflictDiagnosticsPanel } from '../diagnostics/ConflictDiagnosticsPanel';
 import { TauriService } from '../../services/tauri';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import {
@@ -1257,6 +1258,12 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
           <span>{saveToast}</span>
         </div>
       )}
+
+      {/* Conflict Diagnostics — cross-mod deep scan (duplicate ids, cycles, key collisions...) */}
+      <ConflictDiagnosticsPanel
+        userZomboidDir={paths.user_zomboid_dir}
+        onJumpToMod={handleJumpToMod}
+      />
 
       {/* Icon Legend Bar */}
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-2 mb-4 flex items-center justify-between text-xs text-slate-400">
