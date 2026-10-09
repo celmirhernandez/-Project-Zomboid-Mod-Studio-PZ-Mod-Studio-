@@ -1,3 +1,4 @@
+pub mod conflicts;
 pub mod diff_engine;
 pub mod instance_manager;
 pub mod load_order;
