@@ -1,6 +1,7 @@
 use super::mod_info::{sanitize_mod_id, ModManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::iter::FromIterator;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyAnalysisResult {
@@ -78,13 +79,22 @@ pub fn sort_dependencies_topologically(manifests: &[ModManifest]) -> DependencyA
         }
     }
 
-    // Kahn's algorithm for topological sorting
-    let mut queue = VecDeque::new();
-    for (id, &deg) in &in_degree {
-        if deg == 0 {
-            queue.push_back(id.clone());
-        }
-    }
+    // Kahn's algorithm for topological sorting.
+    //
+    // The zero-indegree seed MUST be sorted. `in_degree` is a HashMap, and
+    // iterating it directly produced a different `sorted_mod_ids` order on every
+    // call for the same input — which made the fix engine's plan_id unstable and
+    // its staleness check unusable (a re-scan would "disagree" with a plan the
+    // user had not even changed). Sorted seeding makes the whole sort
+    // deterministic, which is a stronger guarantee than the old behaviour had.
+    let mut seeds: Vec<String> = in_degree
+        .iter()
+        .filter(|(_, &deg)| deg == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+    seeds.sort();
+
+    let mut queue: VecDeque<String> = VecDeque::from_iter(seeds);
 
     let mut sorted = Vec::new();
     while let Some(node) = queue.pop_front() {

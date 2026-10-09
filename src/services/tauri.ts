@@ -2,7 +2,23 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { StudioPathsUI } from '../components/settings/SettingsModule';
-import { VfsConflict, ModInfo, TranslatedErrorCard, DedicatedServerStatus, ConnectedPlayer, ServerQuickSettings, PZServerConfig, ModDiagnostic, DiagnosticSeverity } from '../types';
+import {
+  VfsConflict,
+  ModInfo,
+  TranslatedErrorCard,
+  DedicatedServerStatus,
+  ConnectedPlayer,
+  ServerQuickSettings,
+  PZServerConfig,
+  LogFileInfoUI,
+  ModDiagnostic,
+  DiagnosticSeverity,
+  FixPlan,
+  FixKind,
+  ApplyResult,
+  BackupEntry,
+  RestoreResult,
+} from '../types';
 
 export interface LuaSyntaxResult {
   is_valid: boolean;
@@ -606,6 +622,22 @@ export const TauriService = {
     }
   },
 
+  /**
+   * Strict variants of the two log readers above. The plain wrappers swallow
+   * transport errors and return `[]`, which is right for a monitor panel but
+   * wrong for the diagnostic report: an unreadable log would be reported as
+   * "no log files found", i.e. a false all-clear in the one artifact a user
+   * attaches to a bug report. These rethrow so the caller can record the
+   * failure honestly.
+   */
+  listAvailableLogFilesStrict: async (userZomboidDir: string): Promise<LogFileInfoUI[]> => {
+    return await invoke<LogFileInfoUI[]>('list_available_log_files_cmd', { userZomboidDir });
+  },
+
+  readLogFileStrict: async (filePath: string, maxLines?: number): Promise<string[]> => {
+    return await invoke<string[]>('read_log_file_cmd', { filePath, maxLines });
+  },
+
   exportPresetFile: async (preset: any, filePath: string): Promise<void> => {
     return await invoke('export_preset_file', { preset, filePath });
   },
@@ -782,6 +814,137 @@ export const TauriService = {
       }));
     } catch (err) {
       console.error('Mod diagnostics scan failed:', err);
+      throw err;
+    }
+  },
+
+  // ==========================================
+  // Safe Fix engine (preview -> confirm -> apply -> rollback)
+  // ==========================================
+
+  /**
+   * Builds a FixPlan describing every repair the backend proposes. Read-only:
+   * nothing is written and no IPC side effect happens outside the scan.
+   *
+   * Like scanModDiagnostics this NEVER swallows failures — it logs and rethrows
+   * so the UI can render a real error state rather than an empty plan.
+   */
+  previewModFixes: async (userZomboidDir: string): Promise<FixPlan> => {
+    try {
+      const raw = await invoke<any>('preview_mod_fixes', { userZomboidDir });
+      if (!raw || typeof raw !== 'object') {
+        throw new Error('preview_mod_fixes returned an empty payload.');
+      }
+      if (!Array.isArray(raw.changes)) {
+        throw new Error('preview_mod_fixes returned a plan without a changes array.');
+      }
+
+      return {
+        plan_id: String(raw.plan_id ?? ''),
+        summary: String(raw.summary ?? ''),
+        changes: raw.changes.map((c: any) => ({
+          change_id: String(c.change_id ?? ''),
+          // Rust enum variants arrive verbatim; pass unknown kinds through.
+          kind: String(c.kind ?? 'patch_file') as FixKind,
+          target_path: String(c.target_path ?? ''),
+          description: String(c.description ?? ''),
+          affected_mod_ids: Array.isArray(c.affected_mod_ids) ? c.affected_mod_ids.map(String) : [],
+          reversible: c.reversible !== false,
+          backup_path: c.backup_path ?? null,
+          diff_preview: c.diff_preview ?? null,
+        })),
+        requires_confirmation: raw.requires_confirmation !== false,
+        affected_files: Number(raw.affected_files ?? 0),
+      };
+    } catch (err) {
+      console.error('Fix preview failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Applies a previously previewed plan. The backend validates that the plan is
+   * still current and rejects it when the mod state moved since the preview —
+   * that rejection arrives as a thrown error, which the UI turns into a
+   * first-class "stale plan" state rather than a silent failure.
+   */
+  applyModFix: async (
+    userZomboidDir: string,
+    planId: string,
+    confirmToken: string
+  ): Promise<ApplyResult> => {
+    try {
+      const raw = await invoke<any>('apply_mod_fix', { userZomboidDir, planId, confirmToken });
+      if (!raw || typeof raw !== 'object') {
+        throw new Error('apply_mod_fix returned an empty payload.');
+      }
+      if (!Array.isArray(raw.applied)) {
+        throw new Error('apply_mod_fix returned a result without an applied list.');
+      }
+
+      return {
+        applied: raw.applied.map(String),
+        skipped: Array.isArray(raw.skipped)
+          ? raw.skipped.map((s: any) => ({ change_id: String(s.change_id ?? ''), reason: String(s.reason ?? '') }))
+          : [],
+        backups: Array.isArray(raw.backups)
+          ? raw.backups.map((b: any) => ({
+              backup_id: String(b.backup_id ?? ''),
+              created_at_unix: Number(b.created_at_unix ?? 0),
+              original_path: String(b.original_path ?? ''),
+              backup_path: String(b.backup_path ?? ''),
+              size_bytes: Number(b.size_bytes ?? 0),
+              source: String(b.source ?? ''),
+            }))
+          : [],
+        errors: Array.isArray(raw.errors) ? raw.errors.map(String) : [],
+      };
+    } catch (err) {
+      console.error('Fix apply failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Lists rollback points written by previous applies. Read-only.
+   */
+  listBackups: async (userZomboidDir: string): Promise<BackupEntry[]> => {
+    try {
+      const raw = await invoke<any[]>('list_backups', { userZomboidDir });
+      if (!raw) return [];
+      if (!Array.isArray(raw)) {
+        throw new Error('list_backups returned a malformed payload (expected an array).');
+      }
+      return raw.map((b) => ({
+        backup_id: String(b.backup_id ?? ''),
+        created_at_unix: Number(b.created_at_unix ?? 0),
+        original_path: String(b.original_path ?? ''),
+        backup_path: String(b.backup_path ?? ''),
+        size_bytes: Number(b.size_bytes ?? 0),
+        source: String(b.source ?? ''),
+      }));
+    } catch (err) {
+      console.error('Backup list failed:', err);
+      throw err;
+    }
+  },
+
+  /**
+   * Restores one backup over its original file. This OVERWRITES the live file,
+   * so the UI gates it behind an explicit confirmation.
+   */
+  restoreBackup: async (userZomboidDir: string, backupId: string): Promise<RestoreResult> => {
+    try {
+      const raw = await invoke<any>('restore_backup', { userZomboidDir, backupId });
+      if (!raw || typeof raw !== 'object') {
+        throw new Error('restore_backup returned an empty payload.');
+      }
+      return {
+        restored: Array.isArray(raw.restored) ? raw.restored.map(String) : [],
+        errors: Array.isArray(raw.errors) ? raw.errors.map(String) : [],
+      };
+    } catch (err) {
+      console.error('Backup restore failed:', err);
       throw err;
     }
   },

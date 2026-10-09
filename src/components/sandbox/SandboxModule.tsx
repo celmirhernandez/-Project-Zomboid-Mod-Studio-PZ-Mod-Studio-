@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { TranslatedErrorCard, LogFileInfoUI } from '../../types';
 import { StudioPathsUI } from '../settings/SettingsModule';
 import { TauriService } from '../../services/tauri';
+import { InlineError } from '../common/InlineError';
 import {
   AlertCircle,
   Wrench,
@@ -128,6 +129,8 @@ export const SandboxModule: React.FC<SandboxModuleProps> = ({
   ]);
   const [activeTabId, setActiveTabId] = useState<string>('live_console');
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  /** Inline replacement for the old alert() call; null renders nothing. */
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [clearedOffsets, setClearedOffsets] = useState<Record<string, number>>({});
 
   // Close dropdown on outside click
@@ -272,6 +275,7 @@ export const SandboxModule: React.FC<SandboxModuleProps> = ({
 
   const handleSaveSnapshot = async () => {
     if (!paths.user_zomboid_dir) return;
+    setSnapshotError(null);
     try {
       const serverName = activeTab.id === 'live_server' ? 'servertest' : 'console_snapshot';
       const savedPath = await TauriService.saveServerLogSnapshot(
@@ -285,7 +289,7 @@ export const SandboxModule: React.FC<SandboxModuleProps> = ({
       const files = await TauriService.listAvailableLogFiles(paths.user_zomboid_dir);
       setAvailableLogs(files);
     } catch (err: any) {
-      alert(`Error saving log snapshot: ${err}`);
+      setSnapshotError(`Could not save the log snapshot: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -536,6 +540,18 @@ export const SandboxModule: React.FC<SandboxModuleProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Snapshot failures surface inline instead of in a raw alert() */}
+          {snapshotError && (
+            <InlineError
+              title="Log snapshot failed"
+              message={snapshotError}
+              onDismiss={() => setSnapshotError(null)}
+              onRetry={handleSaveSnapshot}
+              retryLabel="Retry snapshot"
+              className="mx-3 mt-2 mb-0"
+            />
+          )}
 
           {/* Search & Severity Filters Bar */}
           <div className="bg-slate-900 px-3 py-2 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">

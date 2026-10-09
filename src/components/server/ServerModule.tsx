@@ -34,6 +34,7 @@ import {
   ServerQuickSettings,
 } from '../../types';
 import { TauriService } from '../../services/tauri';
+import { InlineError } from '../common/InlineError';
 
 interface ServerModuleProps {
   paths: StudioPathsUI;
@@ -49,6 +50,8 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
   const [activeSubTab, setActiveSubTab] = useState<ServerSubTab>('HOST');
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  /** Inline replacement for the old alert() calls; null renders nothing. */
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Dedicated Server Running State
   const [serverStatus, setServerStatus] = useState<DedicatedServerStatus>({ is_running: false });
@@ -153,8 +156,9 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
   }, [selectedServer, loadQuickSettings]);
 
   const handleCreateServer = async () => {
+    setErrorMessage(null);
     if (!newServerName.trim()) {
-      alert('Enter a name for the server configuration.');
+      setErrorMessage('Enter a name for the server configuration.');
       return;
     }
     try {
@@ -168,7 +172,7 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       setSelectedServer(created);
       await loadQuickSettings(created.file_path);
     } catch (err: any) {
-      alert(`Error creating server: ${err}`);
+      setErrorMessage(`Could not create the server config: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -186,12 +190,13 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
         setSelectedServer(list.length > 0 ? list[0] : null);
       }
     } catch (err: any) {
-      alert(`Error deleting server: ${err}`);
+      setErrorMessage(`Could not delete '${srv.name}.ini': ${err?.message ? err.message : err}`);
     }
   };
 
   const handleSyncToServer = async () => {
     if (!selectedServer) return;
+    setErrorMessage(null);
     try {
       const activeModIds = activeMods.map((m) => m.mod_id);
       await TauriService.syncClientToServer(selectedServer.file_path, activeModIds, activeWorkshopIds);
@@ -200,14 +205,19 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       );
       await loadServerConfigs();
     } catch (err: any) {
-      alert(`Error synchronizing: ${err}`);
+      setErrorMessage(
+        `Could not sync the client mod list to '${selectedServer.name}.ini': ${err?.message ? err.message : err}`
+      );
     }
   };
 
   const handleLaunchDedicatedServer = async () => {
     if (!selectedServer) return;
+    setErrorMessage(null);
     if (!paths.pz_install_dir) {
-      alert('Please configure the Project Zomboid installation path in Settings.');
+      setErrorMessage(
+        'The Project Zomboid installation path is not set. Open Settings and use Auto-Detect Paths, then try again.'
+      );
       return;
     }
     setIsLaunching(true);
@@ -223,7 +233,7 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       setStatusMessage(`🎮 Dedicated server started successfully in interactive console! PID: ${pid}`);
       await refreshServerStatusAndPlayers();
     } catch (err: any) {
-      alert(`Error starting dedicated server: ${err}`);
+      setErrorMessage(`Could not start the dedicated server: ${err?.message ? err.message : err}`);
     } finally {
       setIsLaunching(false);
     }
@@ -236,7 +246,9 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       setStatusMessage(`⏹️ Shutdown signal sent to dedicated server.`);
       await refreshServerStatusAndPlayers();
     } catch (err: any) {
-      alert(`Error stopping server: ${err}`);
+      setErrorMessage(
+        `Could not stop the dedicated server: ${err?.message ? err.message : err}. It may still be running — check the Host tab.`
+      );
     }
   };
 
@@ -259,7 +271,7 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       setStatusMessage(`📢 Broadcast announcement sent to all players: "${broadcastMessage.trim()}"`);
       setBroadcastMessage('');
     } catch (err: any) {
-      alert(`Error sending broadcast: ${err}`);
+      setErrorMessage(`Could not send the broadcast: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -281,7 +293,7 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       setKickModalPlayer(null);
       await refreshServerStatusAndPlayers();
     } catch (err: any) {
-      alert(`Error executing action: ${err}`);
+      setErrorMessage(`Could not run '${action}' on ${player.username}: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -311,7 +323,7 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
         await refreshServerStatusAndPlayers();
       }, 1000);
     } catch (err: any) {
-      alert(`Error al cambiar rol: ${err}`);
+      setErrorMessage(`Could not change the role of ${player.username}: ${err?.message ? err.message : err}`);
       await refreshServerStatusAndPlayers();
     }
   };
@@ -323,7 +335,9 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
       await TauriService.saveServerQuickSettings(selectedServer.file_path, quickSettings);
       setStatusMessage(`💾 Settings saved successfully to '${selectedServer.name}.ini'.`);
     } catch (err: any) {
-      alert(`Error saving settings: ${err}`);
+      setErrorMessage(
+        `Could not save the server settings: ${err?.message ? err.message : err}. Nothing was written to '${selectedServer.name}.ini'.`
+      );
     } finally {
       setIsSavingSettings(false);
     }
@@ -420,6 +434,12 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
         </div>
       )}
 
+      <InlineError
+        title="Server Suite error"
+        message={errorMessage}
+        onDismiss={() => setErrorMessage(null)}
+      />
+
       {/* Main Grid: Server Explorer & Control Center */}
       <div className="grid grid-cols-12 gap-6">
         {/* Left Column: Server (.ini) Files */}
@@ -515,7 +535,9 @@ export const ServerModule: React.FC<ServerModuleProps> = ({ paths, mods }) => {
                       await loadServerConfigs(false);
                       setSelectedServer(created);
                     } catch (err: any) {
-                      alert(`Error: ${err}`);
+                      setErrorMessage(
+                        `Could not create the default server config: ${err?.message ? err.message : err}`
+                      );
                     }
                   }}
                   className="px-3 py-1.5 bg-purple-900/60 hover:bg-purple-800/80 border border-purple-600/50 text-purple-200 text-xs font-semibold rounded-lg transition cursor-pointer"

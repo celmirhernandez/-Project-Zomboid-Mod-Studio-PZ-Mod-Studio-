@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Layers, Plus, Check, Trash2, Zap, FolderArchive, RefreshCw, Edit3, X, Save } from 'lucide-react';
 import { ModInfo, StudioPathsUI, AppInstance } from '../../types';
 import { TauriService } from '../../services/tauri';
+import { InlineError } from '../common/InlineError';
 
 interface InstanceModuleProps {
   paths: StudioPathsUI;
@@ -21,6 +22,8 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
   const [newInstanceDesc, setNewInstanceDesc] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  /** Inline replacement for the old alert() calls; null renders nothing. */
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Edit Modal State
   const [editingInstance, setEditingInstance] = useState<AppInstance | null>(null);
@@ -46,8 +49,9 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
   }, [paths.user_zomboid_dir]);
 
   const handleCreateInstance = async () => {
+    setErrorMessage(null);
     if (!newInstanceName.trim()) {
-      alert('Please enter a name for the profile.');
+      setErrorMessage('Give the profile a name before creating it.');
       return;
     }
 
@@ -71,7 +75,7 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
       // Automatically activate the new profile so all tabs unlock immediately
       await handleActivateInstance(created);
     } catch (err: any) {
-      alert(`Error creating profile: ${err}`);
+      setErrorMessage(`Could not create the profile: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -96,11 +100,12 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
       setEditingInstance(null);
       await loadInstances();
     } catch (err: any) {
-      alert(`Error updating profile: ${err}`);
+      setErrorMessage(`Could not save the profile changes: ${err?.message ? err.message : err}`);
     }
   };
 
   const handleActivateInstance = async (inst: AppInstance) => {
+    setErrorMessage(null);
     try {
       await TauriService.activateInstance(paths.user_zomboid_dir, inst.id);
       onApplyInstanceLoadOrder(inst.load_order, inst.active_mod_ids);
@@ -110,7 +115,9 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
       setStatusMessage(`⚡ Profile '${inst.name}' activated successfully. Mods applied to the game!`);
       await loadInstances();
     } catch (err: any) {
-      alert(`Error activating profile: ${err}`);
+      setErrorMessage(
+        `Could not activate '${inst.name}': ${err?.message ? err.message : err}. Your previous profile is still active.`
+      );
     }
   };
 
@@ -121,7 +128,7 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
       setStatusMessage(`Profile '${inst.name}' deleted.`);
       await loadInstances();
     } catch (err: any) {
-      alert(`Error deleting profile: ${err}`);
+      setErrorMessage(`Could not delete '${inst.name}': ${err?.message ? err.message : err}`);
     }
   };
 
@@ -155,6 +162,14 @@ export const InstanceModule: React.FC<InstanceModuleProps> = ({
           </button>
         </div>
       )}
+
+      <InlineError
+        title="Mod Profiles error"
+        message={errorMessage}
+        onDismiss={() => setErrorMessage(null)}
+        onRetry={loadInstances}
+        retryLabel="Reload profiles"
+      />
 
       {/* Main Grid: Create Profile & Instance Cards */}
       <div className="grid grid-cols-12 gap-6">

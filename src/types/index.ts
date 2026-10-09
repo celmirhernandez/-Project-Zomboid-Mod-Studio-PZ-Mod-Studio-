@@ -157,6 +157,94 @@ export interface ModDiagnostic {
   suggestion: string | null;
 }
 
+/**
+ * Safe Fix engine (preview -> confirm -> apply -> rollback).
+ *
+ * NOTE: like `ModDiagnostic`, these Rust structs carry no `serde(rename_all)`,
+ * so every field arrives from IPC in snake_case exactly as declared here.
+ */
+
+/**
+ * The kind of repair a proposed change performs.
+ *
+ * `FixKind` is `#[serde(rename_all = "snake_case")]` in `src-tauri/src/fixes/mod.rs`,
+ * so the wire values are snake_case, NOT the Rust variant names. (This differs from
+ * `ConflictKind`/`Severity` in `conflicts/mod.rs`, which are SCREAMING_SNAKE/UPPERCASE
+ * — read the enum before assuming, do not infer the casing from a sibling type.)
+ *
+ * Unknown future kinds still render through the `(string & {})` escape hatch.
+ */
+export type FixKind =
+  | 'reorder_load_order'
+  | 'disable_mod'
+  | 'reenable_mod'
+  | 'apply_merge'
+  | 'patch_file'
+  | (string & {});
+
+/**
+ * Machine-readable refusal prefixes. `apply_mod_fix` returns `ApplyResult` (not a
+ * `Result`), so a refusal arrives as `errors: ["PLAN_STALE: ...", ...]` with one
+ * prefix per `FixErrorCode`. Branch on these constants, never on prose.
+ */
+export const FIX_ERROR = {
+  planStale: 'PLAN_STALE',
+  unknownPlan: 'UNKNOWN_PLAN',
+  confirmationRequired: 'CONFIRMATION_REQUIRED',
+  nothingToDo: 'NOTHING_TO_DO',
+  io: 'IO_ERROR',
+} as const;
+
+/** One proposed, not-yet-applied repair. Produced by `preview_mod_fixes`. */
+export interface PlannedChange {
+  change_id: string;
+  kind: FixKind;
+  /** Absolute path (or logical target) the change would write to. */
+  target_path: string;
+  /** Plain-language, operator-facing explanation. Already human-written by Rust. */
+  description: string;
+  affected_mod_ids: string[];
+  /** False when the backend has no rollback path for this change. */
+  reversible: boolean;
+  /** Backup that WILL be written before this change lands; null when none. */
+  backup_path: string | null;
+  /** Optional unified diff, rendered read-only and monospace. */
+  diff_preview: string | null;
+}
+
+/** A preview bound to the mod state it described. Goes stale if that state moves. */
+export interface FixPlan {
+  plan_id: string;
+  summary: string;
+  changes: PlannedChange[];
+  requires_confirmation: boolean;
+  affected_files: number;
+}
+
+/** Outcome of applying one plan; may be partial. */
+export interface ApplyResult {
+  applied: string[];
+  skipped: { change_id: string; reason: string }[];
+  backups: BackupEntry[];
+  errors: string[];
+}
+
+/** A rollback point on disk. Created BEFORE any write happens. */
+export interface BackupEntry {
+  backup_id: string;
+  created_at_unix: number;
+  original_path: string;
+  backup_path: string;
+  size_bytes: number;
+  source: string;
+}
+
+/** Outcome of restoring one or more backups over their originals. */
+export interface RestoreResult {
+  restored: string[];
+  errors: string[];
+}
+
 export interface ModProfile {
   id: string;
   profile_name: string;

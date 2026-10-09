@@ -1,6 +1,6 @@
 use super::protocol::{McpTool, ToolCallResult, ToolContent};
 use crate::diff_engine::lua::{three_way_merge_lua, validate_lua_syntax};
-use crate::load_order::mod_info::{scan_all_installed_mods, scan_all_installed_mods_list};
+use crate::load_order::mod_info::scan_all_installed_mods;
 use crate::load_order::topological_sort::sort_dependencies_topologically;
 use crate::instance_manager::{activate_instance, create_instance, list_instances};
 use crate::patch_generator::{get_master_patch_status, list_merged_packages, save_draft_resolution};
@@ -577,8 +577,12 @@ fn handle_scan_mod_conflicts(args: Value) -> ToolCallResult {
 
 fn handle_scan_mod_diagnostics(args: Value) -> ToolCallResult {
     let paths = resolve_paths(&args);
-    let manifests = scan_all_installed_mods_list(&paths);
-    let diagnostics = crate::conflicts::analyze(&manifests);
+    // Graceful scan: a mod we cannot read is reported in `scan_errors` instead of
+    // aborting the whole scan, so one broken `mod.info` cannot hide every other
+    // mod from an agent.
+    let report = crate::load_order::mod_info::scan_all_installed_mods_with_errors(&paths);
+    let rules = crate::compat::global_rules();
+    let diagnostics = crate::conflicts::analyze_with_compat(&report.all_installs, rules, None);
 
     let errors = diagnostics
         .iter()
@@ -594,11 +598,18 @@ fn handle_scan_mod_diagnostics(args: Value) -> ToolCallResult {
         content: vec![ToolContent {
             content_type: "text".to_string(),
             text: serde_json::to_string_pretty(&json!({
-                "total_mods_scanned": manifests.len(),
+                "total_mods_scanned": report.all_installs.len(),
                 "errors": errors,
                 "warnings": warnings,
                 "infos": infos,
-                "diagnostics": diagnostics
+                "diagnostics": diagnostics,
+                // NEW: files/folders we could not read. Distinct from
+                // `errors`, which counts mod problems.
+                "scan_errors": report.errors,
+                // NEW: where the compatibility catalog came from. An agent must
+                // check this before reporting "no known incompatibilities".
+                "compatibility_status": rules.status,
+                "compatibility_data_available": rules.is_available()
             }))
             .unwrap_or_else(|e| format!("Error: {}", e)),
         }],

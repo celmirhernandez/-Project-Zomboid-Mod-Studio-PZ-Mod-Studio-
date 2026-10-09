@@ -36,6 +36,7 @@ import {
   Lock,
 } from 'lucide-react';
 import Editor from '@monaco-editor/react';
+import { InlineError } from '../common/InlineError';
 
 interface MergerModuleProps {
   conflicts: VfsConflict[];
@@ -74,6 +75,8 @@ export const MergerModule: React.FC<MergerModuleProps> = ({
   const [isCleaning, setIsCleaning] = useState<boolean>(false);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  /** Inline replacement for the old alert() calls; null renders nothing. */
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [patchStatus, setPatchStatus] = useState<MasterPatchStatusInfoUI | null>(null);
 
   // Multi-Package State
@@ -284,7 +287,7 @@ export const MergerModule: React.FC<MergerModuleProps> = ({
     e.preventDefault();
     if (!editingPackageFolder || !editingPackageName.trim()) return;
     if (editingPackageFolder === 'Z_PZModStudio_Bridge') {
-      alert('The Live Bridge mod is an official system module and cannot be renamed.');
+      setErrorMessage('The Live Bridge mod is an official system module and cannot be renamed.');
       setEditingPackageFolder(null);
       return;
     }
@@ -309,7 +312,7 @@ export const MergerModule: React.FC<MergerModuleProps> = ({
 
   const handleDeletePackage = async (folderName: string) => {
     if (folderName === 'Z_PZModStudio_Bridge') {
-      alert('The Live Bridge mod is a protected official system module and cannot be deleted.');
+      setErrorMessage('The Live Bridge mod is a protected official system module and cannot be deleted.');
       return;
     }
     if (confirm(`Are you sure you want to delete the package "${folderName}" from disk?`)) {
@@ -343,7 +346,7 @@ export const MergerModule: React.FC<MergerModuleProps> = ({
         showToast(`✨ Package successfully saved at: ${filePath}`);
       }
     } catch (err: any) {
-      alert(`Error exporting package: ${err}`);
+      setErrorMessage(`Could not export the package: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -365,7 +368,7 @@ export const MergerModule: React.FC<MergerModuleProps> = ({
         }
       }
     } catch (err: any) {
-      alert(`Error importing package: ${err}`);
+      setErrorMessage(`Could not import that package: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -667,6 +670,14 @@ export const MergerModule: React.FC<MergerModuleProps> = ({
           </button>
         </div>
       )}
+
+      <div className="px-4 pt-3 shrink-0">
+        <InlineError
+          title="Mod Merger error"
+          message={errorMessage}
+          onDismiss={() => setErrorMessage(null)}
+        />
+      </div>
 
       {/* LEVEL 1: Overview & Selection (When no package is opened) */}
       {!isPackageOpened ? (

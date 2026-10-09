@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "updated": "2026-10-09",
+  "notes": "Seed compatibility catalog. Mods are matched with conflicts::normalize_id (lowercase, '-'->'_', spaces removed), so 'My Mod' and 'my-mod' are the same id here.",
+  "incompatible_pairs": [
+    {
+      "mods": ["Brita", "Arsenal(26)GunFighter[MAIN MOD 2.0]"],
+      "reason": "Brita's weapon pack targets the older Arsenal(26) GunFighter main module. The 2.0 main module replaced the item registrations it hooks into, so loading both together leaves duplicate weapon items and a broken inventory.",
+      "severity": "error"
+    },
+    {
+      "mods": ["Arsenal(26)GunFighter[MAIN MOD 2.0]", "Arsenal(26)GunFighter"],
+      "reason": "Arsenal(26) GunFighter 2.0 is a full replacement of the original module, not an add-on to it. Both versions declare the same item ids, so only one can be active.",
+      "severity": "error"
+    },
+    {
+      "mods": ["B41_GlobalModOptions", "B42_GlobalModOptions"],
+      "reason": "Global Mod Options has separate Build 41 and Build 42 implementations. Enabling both runs two mod-option menus and one of them registers against the wrong game build.",
+      "severity": "error"
+    }
+  ],
+  "required_libraries": [
+    {
+      "mod": "Brita",
+      "library": "Arsenal(26)GunFighter[MAIN MOD 2.0]",
+      "severity": "error",
+      "reason": "Brita's weapon pack registers ammo and guns through Arsenal(26) GunFighter. Without that library the weapons never appear in the inventory."
+    },
+    {
+      "mod": "Vehicle Scene Customization",
+      "library": "Tsarslib",
+      "severity": "error",
+      "reason": "Vehicle Scene Customization patches Tsar's vehicle definitions at load time. Without Tsarslib it raises a Lua error during vehicle creation."
+    }
+  ],
+  "game_versions": [
+    {
+      "mod": "B42_GlobalModOptions",
+      "min_game_build": "42.0",
+      "max_game_build": null,
+      "severity": "warning",
+      "reason": "The Build 42 Global Mod Options rewrite does not run on Build 41; on 41 the mod loads but its options menu never appears."
+    },
+    {
+      "mod": "B41_GlobalModOptions",
+      "min_game_build": null,
+      "max_game_build": "41.99",
+      "severity": "warning",
+      "reason": "The Build 41 Global Mod Options rewrite is replaced by the native Build 42 mod-options system, so on Build 42 it can be switched off."
+    }
+  ]
+}

@@ -1,5 +1,7 @@
+pub mod compat;
 pub mod conflicts;
 pub mod diff_engine;
+pub mod fixes;
 pub mod instance_manager;
 pub mod load_order;
 pub mod mcp;
@@ -13,7 +15,7 @@ use diff_engine::lua::{three_way_merge_lua, validate_lua_syntax, LuaSyntaxCheckR
 use diff_engine::pz_scripts::{merge_pz_data_scripts, PzScriptMergeResult};
 use instance_manager::{activate_instance, create_instance, delete_instance, list_instances, save_master_load_order, update_instance};
 use load_order::ini_parser::{read_mod_list_ini, write_mod_list_ini, ModListData};
-use load_order::mod_info::{scan_all_installed_mods, scan_all_installed_mods_list, ModManifest};
+use load_order::mod_info::{scan_all_installed_mods, ModManifest};
 use load_order::topological_sort::{sort_dependencies_topologically, DependencyAnalysisResult};
 use patch_generator::{generate_master_patch, MasterPatchRequest, MasterPatchResult};
 use preset_manager::{check_missing_preset_mods, export_preset_file, import_preset_file};
@@ -83,18 +85,64 @@ fn sort_mod_dependencies_cmd(manifests: Vec<ModManifest>) -> DependencyAnalysisR
 /// WITHOUT collapsing manifests by id, so duplicate installs are visible.
 #[tauri::command]
 fn scan_mod_diagnostics_cmd(user_zomboid_dir: String) -> Vec<conflicts::ModDiagnostic> {
+    scan_diagnostics_report(user_zomboid_dir).diagnostics
+}
+
+/// Everything [`scan_mod_diagnostics_cmd`] reports, plus what could not be
+/// read while scanning and whether the compatibility catalog loaded.
+///
+/// `errors` is deliberately SEPARATE from `diagnostics`: a diagnostic is a
+/// problem with the user's mods, an entry in `errors` is a problem with our
+/// ability to see them (unreadable folder, malformed `mod.info`, corrupt saved
+/// profile). Mixing them would let a broken read look like a mod conflict — or,
+/// worse, let a skipped mod disappear without a trace.
+#[derive(serde::Serialize)]
+pub struct ModDiagnosticsReport {
+    pub user_zomboid_dir: String,
+    pub total_mods_scanned: usize,
+    pub diagnostics: Vec<conflicts::ModDiagnostic>,
+    /// One line per mod/folder that could not be read. Sorted and deduplicated.
+    pub errors: Vec<String>,
+    /// Where the compatibility catalog came from. `state == "unavailable"` means
+    /// the UI must say "compatibility data unavailable", not "all clear".
+    pub compatibility_status: compat::CompatStatus,
+}
+
+/// Shared by the Tauri command and the fix engine's plan builder.
+fn resolve_paths_for(user_zomboid_dir: &str) -> StudioPaths {
     let mut paths = auto_detect_paths();
     if !user_zomboid_dir.trim().is_empty() {
-        paths.user_zomboid_dir = user_zomboid_dir.clone();
-        paths.mod_list_ini_path = std::path::Path::new(&user_zomboid_dir)
+        paths.user_zomboid_dir = user_zomboid_dir.to_string();
+        paths.mod_list_ini_path = std::path::Path::new(user_zomboid_dir)
             .join("mods")
             .join("ModListData.ini")
             .to_string_lossy()
             .to_string();
     }
-    let paths = validate_paths(paths);
-    let manifests = scan_all_installed_mods_list(&paths);
-    conflicts::analyze(&manifests)
+    validate_paths(paths)
+}
+
+/// Scan, analyze, and report per-mod read failures instead of swallowing them.
+pub fn scan_diagnostics_report(user_zomboid_dir: String) -> ModDiagnosticsReport {
+    let paths = resolve_paths_for(&user_zomboid_dir);
+    let report = load_order::mod_info::scan_all_installed_mods_with_errors(&paths);
+    let rules = compat::global_rules();
+    let diagnostics = conflicts::analyze_with_compat(&report.all_installs, rules, None);
+    ModDiagnosticsReport {
+        user_zomboid_dir: paths.user_zomboid_dir,
+        total_mods_scanned: report.all_installs.len(),
+        diagnostics,
+        errors: report.errors,
+        compatibility_status: rules.status.clone(),
+    }
+}
+
+/// Same data as [`scan_mod_diagnostics_cmd`] but with the errors and the
+/// compatibility-data status included. Added alongside the original rather than
+/// replacing it, so existing frontend code keeps working unchanged.
+#[tauri::command]
+fn scan_mod_diagnostics_report_cmd(user_zomboid_dir: String) -> ModDiagnosticsReport {
+    scan_diagnostics_report(user_zomboid_dir)
 }
 
 #[tauri::command]
@@ -329,6 +377,11 @@ pub fn run() {
             write_mod_list_ini_cmd,
             scan_all_installed_mods_cmd,
             scan_mod_diagnostics_cmd,
+            scan_mod_diagnostics_report_cmd,
+            fixes::preview_mod_fixes,
+            fixes::apply_mod_fix,
+            fixes::list_backups,
+            fixes::restore_backup,
             sort_mod_dependencies_cmd,
             launch_sandbox_cmd,
             generate_master_patch_cmd,

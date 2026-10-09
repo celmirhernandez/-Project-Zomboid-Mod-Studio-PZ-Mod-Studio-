@@ -12,8 +12,23 @@ import { TauriService } from './services/tauri';
 import { ServerModule } from './components/server/ServerModule';
 import { InstanceModule } from './components/instances/InstanceModule';
 import { SplashScreen } from './components/layout/SplashScreen';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { InlineError } from './components/common/InlineError';
 
 import { Sparkles, CheckCircle2, AlertTriangle } from 'lucide-react';
+
+/**
+ * Names used by the top-level boundaries so a crash report says which module
+ * failed instead of "something went wrong".
+ */
+const MODULE_LABELS: Record<ActiveTab, string> = {
+  PROFILES: 'Mod Profiles',
+  MOD_LIST: 'Mod List',
+  SERVERS: 'Server Suite',
+  MERGER: 'Mod Merger',
+  MONITOR: 'Sandbox Monitor',
+  SETTINGS: 'App Settings',
+};
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>('PROFILES');
@@ -29,6 +44,8 @@ export const App: React.FC = () => {
     files_written: number;
     polyfills_injected: number;
   } | null>(null);
+  /** Inline replacement for the old alert() calls; null renders nothing. */
+  const [appError, setAppError] = useState<string | null>(null);
 
   // Loading Screen & Startup State
   const [isInitializing, setIsInitializing] = useState<boolean>(true);
@@ -175,8 +192,11 @@ export const App: React.FC = () => {
 
   // Auto-Merge All conflicts in memory (without premature packaging)
   const handleAutoMergeAll = async () => {
+    setAppError(null);
     if (!paths.is_valid) {
-      alert('Configure and validate PZ paths before generating automatic patches.');
+      setAppError(
+        'Your PZ paths are not validated yet. Open App Settings and run Auto-Detect Paths (or fix the flagged folder), then merge again.'
+      );
       return;
     }
 
@@ -208,7 +228,7 @@ export const App: React.FC = () => {
 
       await handleRefreshMods();
     } catch (err: any) {
-      alert(`Error generating Auto-Merge: ${err}`);
+      setAppError(`Auto-Merge could not run: ${err?.message ? err.message : err}. No patch package was written.`);
     }
   };
 
@@ -272,6 +292,7 @@ export const App: React.FC = () => {
   });
 
   const executeLaunch = async (mode: GameLaunchMode = 'DEBUG_FULLSCREEN') => {
+    setAppError(null);
     try {
       const activeModIds = mods.filter((m) => m.enabled).map((m) => m.mod_id);
       await TauriService.writeModListIni(paths.mod_list_ini_path, activeModIds);
@@ -286,7 +307,9 @@ export const App: React.FC = () => {
         setActiveTab('MONITOR');
       }
     } catch (err: any) {
-      alert(`Error launching PZ sandbox: ${err}`);
+      setAppError(
+        `Project Zomboid could not be launched: ${err?.message ? err.message : err}. Check the install path in App Settings and that no other PZ instance is running.`
+      );
     }
   };
 
@@ -493,10 +516,22 @@ export const App: React.FC = () => {
           errorCardCount={errorCards.length}
         />
 
-        {/* Tab Modules */}
+        {/* Tab Modules — each tab is guarded so a single broken panel cannot
+            take down the sidebar, the header or the user's other work. */}
         <main className="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden bg-slate-950">
+          {appError && (
+            <div className="px-6 pt-4 shrink-0">
+              <InlineError
+                title="Studio error"
+                message={appError}
+                onDismiss={() => setAppError(null)}
+              />
+            </div>
+          )}
+
           {activeTab === 'PROFILES' && (
             <div className="flex-1 flex flex-col min-h-0 overflow-y-auto p-6 font-sans">
+              <ErrorBoundary name={MODULE_LABELS.PROFILES}>
               <InstanceModule
                 paths={paths}
                 mods={mods}
@@ -506,69 +541,80 @@ export const App: React.FC = () => {
                   setActiveTab('MOD_LIST');
                 }}
               />
+              </ErrorBoundary>
             </div>
           )}
 
           {activeTab === 'MOD_LIST' && (
-            <LoadOrderModule
-              paths={paths}
-              mods={mods}
-              onReorder={handleReorderMods}
-              onToggleMod={handleToggleMod}
-              onRefreshMods={handleRefreshMods}
-              onGoToSettings={() => setActiveTab('SETTINGS')}
-              onLoadMockups={handleLoadModMockups}
-              onApplyPresetLoadOrder={handleApplyPresetLoadOrder}
-              openedPackageFolder={openedPackageFolder}
-            />
+            <ErrorBoundary name={MODULE_LABELS.MOD_LIST} onReset={handleRefreshMods}>
+              <LoadOrderModule
+                paths={paths}
+                mods={mods}
+                onReorder={handleReorderMods}
+                onToggleMod={handleToggleMod}
+                onRefreshMods={handleRefreshMods}
+                onGoToSettings={() => setActiveTab('SETTINGS')}
+                onLoadMockups={handleLoadModMockups}
+                onApplyPresetLoadOrder={handleApplyPresetLoadOrder}
+                openedPackageFolder={openedPackageFolder}
+              />
+            </ErrorBoundary>
           )}
 
           {activeTab === 'SERVERS' && (
             <div className="flex-1 flex flex-col min-h-0 overflow-y-auto p-6 font-sans">
-              <ServerModule
-                paths={paths}
-                mods={mods}
-              />
+              <ErrorBoundary name={MODULE_LABELS.SERVERS}>
+                <ServerModule
+                  paths={paths}
+                  mods={mods}
+                />
+              </ErrorBoundary>
             </div>
           )}
 
           {activeTab === 'MERGER' && (
-            <MergerModule
-              conflicts={conflicts}
-              paths={paths}
-              onResolveConflict={handleResolveConflict}
-              onAutoMergeAll={handleAutoMergeAll}
-              onOptimizeAndResolve={handleOptimizeAndResolve}
-              onGoToSettings={() => setActiveTab('SETTINGS')}
-              onRescan={handleRescan}
-              onClearConflicts={() => setConflicts([])}
-              onLoadMockups={handleLoadMockups}
-              onToggleMod={handleToggleMod}
-              onRefreshMods={handleRefreshMods}
-              onPackageOpened={(folder) => setOpenedPackageFolder(folder)}
-              onPackageClosed={() => setOpenedPackageFolder(null)}
-            />
+            <ErrorBoundary name={MODULE_LABELS.MERGER} onReset={handleRescan}>
+              <MergerModule
+                conflicts={conflicts}
+                paths={paths}
+                onResolveConflict={handleResolveConflict}
+                onAutoMergeAll={handleAutoMergeAll}
+                onOptimizeAndResolve={handleOptimizeAndResolve}
+                onGoToSettings={() => setActiveTab('SETTINGS')}
+                onRescan={handleRescan}
+                onClearConflicts={() => setConflicts([])}
+                onLoadMockups={handleLoadMockups}
+                onToggleMod={handleToggleMod}
+                onRefreshMods={handleRefreshMods}
+                onPackageOpened={(folder) => setOpenedPackageFolder(folder)}
+                onPackageClosed={() => setOpenedPackageFolder(null)}
+              />
+            </ErrorBoundary>
           )}
 
           {activeTab === 'MONITOR' && (
-            <SandboxModule
-              paths={paths}
-              errorCards={errorCards}
-              onApplyFix={handleApplyFix}
-              onClearErrorCards={handleClearErrorCards}
-              onGoToSettings={() => setActiveTab('SETTINGS')}
-            />
+            <ErrorBoundary name={MODULE_LABELS.MONITOR}>
+              <SandboxModule
+                paths={paths}
+                errorCards={errorCards}
+                onApplyFix={handleApplyFix}
+                onClearErrorCards={handleClearErrorCards}
+                onGoToSettings={() => setActiveTab('SETTINGS')}
+              />
+            </ErrorBoundary>
           )}
 
           {activeTab === 'SETTINGS' && (
             <div className="flex-1 flex flex-col min-h-0 overflow-y-auto p-6 font-sans">
-              <SettingsModule
-                paths={paths}
-                rules={rules}
-                onSavePaths={handleSavePaths}
-                onToggleRule={handleToggleRule}
-                onAutoDetect={handleAutoDetect}
-              />
+              <ErrorBoundary name={MODULE_LABELS.SETTINGS} onReset={handleAutoDetect}>
+                <SettingsModule
+                  paths={paths}
+                  rules={rules}
+                  onSavePaths={handleSavePaths}
+                  onToggleRule={handleToggleRule}
+                  onAutoDetect={handleAutoDetect}
+                />
+              </ErrorBoundary>
             </div>
           )}
         </main>

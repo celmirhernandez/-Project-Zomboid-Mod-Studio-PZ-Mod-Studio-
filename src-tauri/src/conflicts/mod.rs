@@ -629,3 +629,32 @@ pub fn analyze(manifests: &[ModManifest]) -> Vec<ModDiagnostic> {
     out.extend(cycles_to_diagnostics(&find_dependency_cycles(manifests)));
     out
 }
+
+/// The full report: every manifest-level detector from [`analyze`] plus the
+/// crowd-sourced catalog from [`crate::compat`], and the catalog's load status
+/// so the UI can say "compatibility data unavailable" instead of implying a
+/// clean install.
+///
+/// `current_build` is the running game build if known; `None` simply skips the
+/// version-range detector (an unknown build is not a mismatch).
+pub fn analyze_with_compat(
+    manifests: &[ModManifest],
+    rules: &crate::compat::CompatRules,
+    current_build: Option<&str>,
+) -> Vec<ModDiagnostic> {
+    let mut out = analyze(manifests);
+    out.extend(crate::compat::analyze_with_catalog(rules, manifests, current_build));
+    out
+}
+
+/// [`analyze_with_compat`] against the process-wide cached catalog.
+pub fn analyze_with_global_compat(
+    manifests: &[ModManifest],
+    current_build: Option<&str>,
+) -> (Vec<ModDiagnostic>, crate::compat::CompatStatus) {
+    let rules = crate::compat::global_rules();
+    (
+        analyze_with_compat(manifests, rules, current_build),
+        rules.status.clone(),
+    )
+}

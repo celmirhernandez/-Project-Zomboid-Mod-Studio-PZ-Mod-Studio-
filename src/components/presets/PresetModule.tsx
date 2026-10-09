@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Download, Upload, Package, Check, AlertTriangle, Layers, ExternalLink, ShieldCheck, Sparkles } from 'lucide-react';
 import { ModInfo, StudioPathsUI, ModPreset, MissingModsReport } from '../../types';
 import { TauriService } from '../../services/tauri';
+import { InlineError } from '../common/InlineError';
 
 interface PresetModuleProps {
   paths: StudioPathsUI;
@@ -20,12 +21,15 @@ export const PresetModule: React.FC<PresetModuleProps> = ({
   const [missingReport, setMissingReport] = useState<MissingModsReport | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  /** Inline replacement for the old alert() calls; null renders nothing. */
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const activeMods = mods.filter((m) => m.enabled);
 
   const handleExportPreset = async () => {
+    setErrorMessage(null);
     if (!presetName.trim()) {
-      alert('Please enter a name for the collection / preset.');
+      setErrorMessage('Give the collection a name before saving it.');
       return;
     }
 
@@ -54,13 +58,14 @@ export const PresetModule: React.FC<PresetModuleProps> = ({
         setPresetDesc('');
       }
     } catch (err: any) {
-      alert(`Error exporting preset: ${err}`);
+      setErrorMessage(`Could not save the collection: ${err?.message ? err.message : err}`);
     } finally {
       setIsExporting(false);
     }
   };
 
   const handleImportPreset = async () => {
+    setErrorMessage(null);
     try {
       const filePath = await TauriService.pickOpenFile();
       if (filePath) {
@@ -75,7 +80,7 @@ export const PresetModule: React.FC<PresetModuleProps> = ({
         setMissingReport(report);
       }
     } catch (err: any) {
-      alert(`Error importing .pzpack file: ${err}`);
+      setErrorMessage(`Could not import that .pzpack file: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -123,6 +128,14 @@ export const PresetModule: React.FC<PresetModuleProps> = ({
           </button>
         </div>
       )}
+
+      <InlineError
+        title="Presets error"
+        message={errorMessage}
+        onDismiss={() => setErrorMessage(null)}
+        onRetry={handleImportPreset}
+        retryLabel="Try import again"
+      />
 
       {/* Main Grid: Export Panel & Import Viewer */}
       <div className="grid grid-cols-12 gap-6">

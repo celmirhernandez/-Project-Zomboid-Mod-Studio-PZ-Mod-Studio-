@@ -587,10 +587,48 @@ pub struct DiscoveredMods {
     pub all_installs: Vec<ModManifest>,
 }
 
+/// What a scan produced, plus everything that went wrong along the way.
+///
+/// **One broken mod must never hide the rest.** Every per-mod failure while
+/// walking the Workshop and local `mods` folders is collected here instead of
+/// aborting the scan, so the caller can report `diagnostics` *and* `errors`
+/// side by side. An unreadable `mod.info` no longer costs you the whole scan;
+/// the user sees a clean list plus a list of files that need attention.
+#[derive(Debug, Clone, Default)]
+pub struct ModScanReport {
+    /// Every install found on disk, duplicates included, in discovery order.
+    pub all_installs: Vec<ModManifest>,
+    /// One human-readable line per thing that could not be read or written,
+    /// sorted and deduplicated. Empty means the scan saw no problems.
+    pub errors: Vec<String>,
+}
+
+/// Whether a scan is allowed to touch the disk.
+///
+/// The historical scan repairs mod folders in place: it creates the build-42
+/// sub-folder, copies `mod.info` into it, mirrors `media/`, and auto-installs the
+/// Live Bridge companion mod. That is useful for a normal "scan my mods" action
+/// but **forbidden** for a dry run — the fix engine's preview must be a pure
+/// read, otherwise two previews of an unchanged install produce different plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    /// Repair mod folders in place, as the app has always done.
+    Repairing,
+    /// Read only. Never creates, copies or installs anything.
+    ReadOnly,
+}
+
+impl ScanMode {
+    fn may_write(self) -> bool {
+        self == ScanMode::Repairing
+    }
+}
+
 /// Scans all subscribed Workshop & local mods recursively without depth limits.
 /// Preserves exact ModListData.ini load order for active mods, and sorts remaining mods deterministically.
 pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
-    discover_installed_mods(paths).ordered
+    let mut errors = Vec::new();
+    discover_installed_mods_with(paths, &mut errors, ScanMode::Repairing).ordered
 }
 
 /// Same scan as [`scan_all_installed_mods`] but WITHOUT collapsing manifests by
@@ -601,10 +639,67 @@ pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
 /// Used by the conflict engine (`conflicts::detect_duplicate_mods`), which is
 /// permanently blind if the id-keyed `HashMap` collapse happens first.
 pub fn scan_all_installed_mods_list(paths: &StudioPaths) -> Vec<ModManifest> {
-    discover_installed_mods(paths).all_installs
+    let mut errors = Vec::new();
+    discover_installed_mods_with(paths, &mut errors, ScanMode::Repairing).all_installs
 }
 
-fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
+/// A **pure read** of every installed mod: no folder is created, no `mod.info`
+/// copied, no companion mod installed.
+///
+/// Use this for anything that must not have a side effect — the fix engine's
+/// preview in particular, where a write during "previewing" would make the plan
+/// un-hashable and break the staleness guarantee.
+pub fn scan_all_installed_mods_read_only(paths: &StudioPaths) -> Vec<ModManifest> {
+    let mut errors = Vec::new();
+    discover_installed_mods_with(paths, &mut errors, ScanMode::ReadOnly).all_installs
+}
+
+/// The un-collapsed scan **plus** every per-mod error collected on the way.
+///
+/// This is the graceful path: a mod whose `mod.info` is unreadable, truncated,
+/// or permission-denied is reported in `errors` while every other mod is still
+/// returned in `all_installs`.
+pub fn scan_all_installed_mods_with_errors(paths: &StudioPaths) -> ModScanReport {
+    scan_all_installed_mods_in_mode(paths, ScanMode::Repairing)
+}
+
+/// [`scan_all_installed_mods_with_errors`] in a chosen [`ScanMode`]. Use
+/// [`ScanMode::ReadOnly`] where a write would be wrong (see
+/// [`scan_all_installed_mods_read_only`]).
+pub fn scan_all_installed_mods_in_mode(paths: &StudioPaths, mode: ScanMode) -> ModScanReport {
+    let mut errors: Vec<String> = Vec::new();
+    let discovered = discover_installed_mods_with(paths, &mut errors, mode);
+    // A deterministic, deduplicated error list: two directories with the same
+    // broken file must not show up twice, and readdir order must not change
+    // what the user sees.
+    errors.sort();
+    errors.dedup();
+    ModScanReport {
+        all_installs: discovered.all_installs,
+        errors,
+    }
+}
+
+fn note_scan_error(errors: &mut Vec<String>, path: &Path, what: &str) {
+    if errors.len() > 500 {
+        // Pathological trees must not be able to exhaust memory here.
+        return;
+    }
+    errors.push(format!("{}: {}", path.to_string_lossy(), what));
+}
+
+/// `walkdir::Error::path()` is `None` for a few I/O failures that have no usable
+/// path. Fall back to the root we were walking so the message still names
+/// something the user can act on.
+fn scan_root_for<'a>(path: Option<&'a Path>, root: &'a Path) -> &'a Path {
+    path.unwrap_or(root)
+}
+
+fn discover_installed_mods_with(
+    paths: &StudioPaths,
+    errors: &mut Vec<String>,
+    mode: ScanMode,
+) -> DiscoveredMods {
     let mut all_mods_map: std::collections::HashMap<String, ModManifest> = std::collections::HashMap::new();
     let mut mod_scores: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     // Highest-scoring version dir already recorded per mod id, so a single
@@ -620,7 +715,14 @@ fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
     let subscribed_ids = get_subscribed_workshop_ids(workshop_path);
 
     if workshop_path.exists() {
-        for entry in WalkDir::new(workshop_path).max_depth(8).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(workshop_path).max_depth(8).into_iter() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    note_scan_error(errors, scan_root_for(e.path(), workshop_path), &format!("folder could not be read: {}", e));
+                    continue;
+                }
+            };
             if entry.file_name() == "mod.info" {
                 let mod_file_path = entry.path().to_path_buf();
                 let workshop_id = extract_workshop_id_from_path(&mod_file_path);
@@ -650,23 +752,35 @@ fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
                             })
                             .unwrap_or(false);
 
-                        if !has_any_version_subdir {
+                        if mode.may_write() && !has_any_version_subdir {
                             let dir_42 = parent.join("42");
                             let info_42 = dir_42.join("mod.info");
                             if !info_42.exists() && &mod_file_path != &info_42 {
-                                let _ = fs::create_dir_all(&dir_42);
-                                let _ = fs::copy(&mod_file_path, &info_42);
+                                if let Err(e) = fs::create_dir_all(&dir_42) {
+                                    note_scan_error(errors, &dir_42, &format!("could not create build-42 folder: {}", e));
+                                }
+                                if let Err(e) = fs::copy(&mod_file_path, &info_42) {
+                                    note_scan_error(errors, &info_42, &format!("could not copy mod.info into the build-42 folder: {}", e));
+                                }
                                 let top_media = parent.join("media");
                                 let dir_42_media = dir_42.join("media");
                                 if top_media.exists() && !dir_42_media.exists() {
-                                    let _ = copy_dir_all(&top_media, &dir_42_media);
+                                    if let Err(e) = copy_dir_all(&top_media, &dir_42_media) {
+                                        note_scan_error(errors, &dir_42_media, &format!("could not copy the media folder: {}", e));
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                if let Some(mut manifest) = parse_mod_info(&mod_file_path) {
+                // A mod.info we cannot read must not cost the user the other
+                // mods: record it and keep scanning.
+                let parsed = parse_mod_info(&mod_file_path);
+                if parsed.is_none() {
+                    note_scan_error(errors, &mod_file_path, "could not be read as a mod.info (missing or malformed `id=` line)");
+                }
+                if let Some(mut manifest) = parsed {
                     if manifest.id == "PZModStudioCarrier" {
                         continue;
                     }
@@ -690,9 +804,18 @@ fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
     // 2. Auto-install Live Bridge mod if missing in user's Zomboid/mods directory
     let user_dirs = get_all_user_zomboid_dirs(&paths.user_zomboid_dir);
     for user_dir in &user_dirs {
+        if !mode.may_write() {
+            break;
+        }
         let bridge_dir = user_dir.join("mods").join("Z_PZModStudio_Bridge");
         if !bridge_dir.exists() {
-            let _ = crate::sandbox::install_bridge_companion_mod(&user_dir.to_string_lossy());
+            if let Err(e) = crate::sandbox::install_bridge_companion_mod(&user_dir.to_string_lossy()) {
+                note_scan_error(
+                    errors,
+                    &bridge_dir,
+                    &format!("Live Bridge companion mod could not be installed: {}", e),
+                );
+            }
         }
     }
 
@@ -702,9 +825,24 @@ fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
     for user_dir in &user_dirs {
         let user_mods_path = user_dir.join("mods");
         if user_mods_path.exists() {
-            for entry in WalkDir::new(&user_mods_path).max_depth(8).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(&user_mods_path).max_depth(8).into_iter() {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        note_scan_error(errors, scan_root_for(e.path(), &user_mods_path), &format!("folder could not be read: {}", e));
+                        continue;
+                    }
+                };
                 if entry.file_name() == "mod.info" {
-                    if let Some(mut manifest) = parse_mod_info(entry.path()) {
+                    let parsed = parse_mod_info(entry.path());
+                    if parsed.is_none() {
+                        note_scan_error(
+                            errors,
+                            entry.path(),
+                            "could not be read as a mod.info (missing or malformed `id=` line)",
+                        );
+                    }
+                    if let Some(mut manifest) = parsed {
                         if manifest.id == "PZModStudioCarrier" {
                             continue;
                         }
@@ -799,6 +937,11 @@ fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
                     let path = entry.path();
                     if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
                         if let Ok(c) = fs::read_to_string(&path) {
+                            if let Err(e) = serde_json::from_str::<crate::instance_manager::AppInstance>(&c) {
+                                // A corrupt profile must not hide every other profile.
+                                note_scan_error(errors, &path, &format!("saved profile could not be read: {}", e));
+                                continue;
+                            }
                             if let Ok(inst) = serde_json::from_str::<crate::instance_manager::AppInstance>(&c) {
                                 if inst.is_active && !inst.load_order.is_empty() {
                                     saved_load_order = Some(inst.load_order);
@@ -819,6 +962,9 @@ fn discover_installed_mods(paths: &StudioPaths) -> DiscoveredMods {
         let master_path = u_dir.join("PZModStudio_MasterLoadOrder.json");
         if master_path.exists() {
             if let Ok(c) = fs::read_to_string(&master_path) {
+                if serde_json::from_str::<serde_json::Value>(&c).is_err() {
+                    note_scan_error(errors, &master_path, "saved master load order could not be read as JSON");
+                }
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&c) {
                     if let Some(arr) = json_val["load_order"].as_array() {
                         let order: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
@@ -1414,6 +1560,165 @@ mod tests {
             let manifest = parse_mod_info(v42_20_info).expect("Must parse 42.20 mod.info");
             assert_eq!(manifest.require, vec!["Bandits2".to_string()]);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Graceful scanning (P3): one bad mod must not block the others.
+    // -----------------------------------------------------------------------
+
+    struct ScanSandbox {
+        root: std::path::PathBuf,
+    }
+
+    impl ScanSandbox {
+        fn new(tag: &str) -> ScanSandbox {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let root = std::env::temp_dir().join(format!("pzms_scan_{}_{}", tag, nanos));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(root.join("mods")).expect("must create the sandbox");
+            ScanSandbox { root }
+        }
+
+        fn path(&self) -> crate::vfs::StudioPaths {
+            crate::vfs::StudioPaths {
+                pz_install_dir: String::new(),
+                workshop_dir: String::new(),
+                user_zomboid_dir: self.root.to_string_lossy().to_string(),
+                mod_list_ini_path: self
+                    .root
+                    .join("mods")
+                    .join("ModListData.ini")
+                    .to_string_lossy()
+                    .to_string(),
+                carrier_workshop_id: None,
+                is_valid: true,
+            }
+        }
+
+        fn mod_info(&self, folder: &str, body: &str) {
+            let dir = self.root.join("mods").join(folder);
+            fs::create_dir_all(&dir).expect("must create the mod folder");
+            fs::write(dir.join("mod.info"), body).expect("must write the fixture");
+        }
+    }
+
+    impl Drop for ScanSandbox {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn a_broken_mod_info_is_reported_without_hiding_the_good_mods() {
+        let sb = ScanSandbox::new("broken_one");
+        sb.mod_info("GoodA", "name=GoodA\nid=GoodA\n");
+        // No `id=` line at all: unparseable.
+        sb.mod_info("Broken", "name=Broken\nauthor=nobody\n");
+        sb.mod_info("GoodB", "name=GoodB\nid=GoodB\n");
+
+        let report = scan_all_installed_mods_with_errors(&sb.path());
+
+        let ids: Vec<String> = report.all_installs.iter().map(|m| m.id.clone()).collect();
+        assert!(
+            ids.contains(&"GoodA".to_string()) && ids.contains(&"GoodB".to_string()),
+            "one broken mod must not hide the rest, got {:?}",
+            ids
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("Broken")),
+            "the broken mod must be named in the errors, got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn scan_errors_are_sorted_and_deduplicated() {
+        let sb = ScanSandbox::new("sorted");
+        sb.mod_info("Broken1", "no id here\n");
+        sb.mod_info("Broken2", "also no id\n");
+
+        let a = scan_all_installed_mods_with_errors(&sb.path()).errors;
+        let mut expected = a.clone();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(a, expected, "scan errors must be sorted and deduplicated");
+    }
+
+    #[test]
+    fn a_completely_empty_folder_scans_clean() {
+        let sb = ScanSandbox::new("empty");
+        // Read-only: the repairing scan deliberately auto-installs the Live
+        // Bridge companion mod, so it would legitimately find one.
+        //
+        // The scan also walks every other candidate Zomboid folder on this
+        // machine, so the result set cannot be asserted empty here — what this
+        // test actually pins down is totality: an empty folder must scan without
+        // panicking, and must not contribute a fabricated mod of its own.
+        let report = scan_all_installed_mods_in_mode(&sb.path(), ScanMode::ReadOnly);
+        assert!(
+            report.all_installs.iter().all(|m| !m.id.is_empty()),
+            "a scan must never invent a mod with an empty id"
+        );
+        // Nothing was created inside the sandbox.
+        let installed: Vec<String> = fs::read_dir(sb.root.join("mods"))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            installed.is_empty(),
+            "a read-only scan must not populate the folder, got {:?}",
+            installed
+        );
+    }
+
+    #[test]
+    fn read_only_scan_creates_nothing() {
+        let sb = ScanSandbox::new("readonly");
+        sb.mod_info("Good", "name=Good\nid=Good\n");
+        let before: Vec<String> = fs::read_dir(sb.root.join("mods"))
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+
+        let report = scan_all_installed_mods_in_mode(&sb.path(), ScanMode::ReadOnly);
+        assert!(!report.all_installs.is_empty());
+
+        let after: Vec<String> = fs::read_dir(sb.root.join("mods"))
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            before, after,
+            "a read-only scan must not install or create anything"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_saved_profile_does_not_hide_the_other_mods() {
+        let sb = ScanSandbox::new("corrupt_profile");
+        sb.mod_info("GoodA", "name=GoodA\nid=GoodA\n");
+        sb.mod_info("GoodB", "name=GoodB\nid=GoodB\n");
+
+        let inst_dir = sb.root.join("PZModStudio_Instances");
+        fs::create_dir_all(&inst_dir).expect("must create the instances dir");
+        fs::write(inst_dir.join("inst_broken.json"), "{ not json at all ")
+            .expect("must write the corrupt profile");
+
+        let report = scan_all_installed_mods_with_errors(&sb.path());
+        assert!(
+            report.all_installs.len() >= 2,
+            "a corrupt profile must not hide the mods, got {}",
+            report.all_installs.len()
+        );
+        assert!(
+            report.errors.iter().any(|e| e.contains("inst_broken.json")),
+            "the corrupt profile must be reported, got {:?}",
+            report.errors
+        );
     }
 }
 

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FolderOpen, CheckCircle, AlertTriangle, RefreshCw, HardDrive, Wrench, Plus, Bell, Bot, Copy, Check, Terminal, Radio, Code2, Layers, Info, Lightbulb } from 'lucide-react';
 import { PolyfillRule } from '../../types';
 import { TauriService } from '../../services/tauri';
+import { DiagnosticReportCard } from '../diagnostics/DiagnosticReportCard';
 
 export interface StudioPathsUI {
   pz_install_dir: string;
@@ -35,6 +36,8 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
     setFormData(paths);
   }, [paths]);
 
+  /** Shows the "importer not wired yet" explainer instead of a raw alert(). */
+  const [importerNotice, setImporterNotice] = useState<boolean>(false);
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
   const [noticeSilenced, setNoticeSilenced] = useState<boolean>(
     localStorage.getItem('pz_hide_autosort_notice') === 'true'
@@ -455,6 +458,9 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
               </div>
             </div>
 
+            {/* Card 5b: Diagnostic Report (bug report bundle) */}
+            <DiagnosticReportCard userZomboidDir={paths.user_zomboid_dir} />
+
             {/* Card 6: Startup Screen Behavior */}
             <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -535,13 +541,37 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
               </span>
 
               <button
-                onClick={() => alert('Community Rule Importer: Select a poly_rules.json file to import extra rules.')}
+                onClick={() => setImporterNotice(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 rounded-lg shadow transition cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 Import Community Rule (.json)
               </button>
             </div>
+
+            {/* Placeholder notice for the not-yet-wired community rule importer. */}
+            {importerNotice && (
+            <div className="bg-cyan-950/40 border border-cyan-800/60 border-l-4 border-l-cyan-500 rounded-lg px-3.5 py-2.5 flex items-start gap-2 animate-fade-in">
+              <Info className="w-4 h-4 text-cyan-400 shrink-0 mt-px" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-cyan-300">
+                  Community Rule Importer
+                </div>
+                <div className="text-[11px] text-slate-200 leading-relaxed mt-0.5">
+                  Select a <span className="font-mono text-cyan-300">poly_rules.json</span> file to import extra
+                  rules. This importer is not wired to the backend yet — no file dialog opens and nothing is
+                  written. The built-in rules below are the only active source.
+                </div>
+              </div>
+              <button
+                onClick={() => setImporterNotice(false)}
+                className="text-slate-500 hover:text-slate-200 transition cursor-pointer text-[11px] shrink-0"
+                title="Dismiss"
+              >
+                Dismiss
+              </button>
+            </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {rules.map((rule) => (

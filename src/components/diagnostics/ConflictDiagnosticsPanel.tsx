@@ -369,6 +369,14 @@ export const ConflictDiagnosticsPanel: React.FC<ConflictDiagnosticsPanelProps> =
                   <div className="text-[11px] text-slate-300 leading-relaxed mt-0.5 break-words font-mono">
                     {errorMessage}
                   </div>
+                  <div className="flex items-start gap-1.5 mt-2 text-[11px] leading-relaxed">
+                    <Lightbulb className="w-3 h-3 text-amber-400 shrink-0 mt-px" />
+                    <span className="text-amber-200/90">
+                      A scan failure usually means a mod.info could not be read. Close the game if it is
+                      running so the Workshop folder is not locked, then retry. If it still fails, build a
+                      diagnostic report from <b className="font-mono">Settings</b> and attach it.
+                    </span>
+                  </div>
                 </div>
               </div>
               <div className="flex items-center justify-end pt-0.5">
@@ -526,11 +534,15 @@ export const ConflictDiagnosticsPanel: React.FC<ConflictDiagnosticsPanelProps> =
                         </pre>
                       )}
 
-                      {/* Suggestion */}
+                      {/* Suggestion — the actionable half of a finding, so it gets
+                          its own highlighted rail rather than a quiet footnote. */}
                       {d.suggestion && (
-                        <div className="flex items-start gap-1.5 pt-0.5 text-[11px] leading-relaxed">
-                          <Lightbulb className="w-3 h-3 text-amber-400 shrink-0 mt-px" />
-                          <span className="text-amber-200/90">{d.suggestion}</span>
+                        <div className="flex items-start gap-2 pt-1 mt-0.5 border-t border-slate-800/70">
+                          <span className="flex items-center gap-1 text-[9px] font-mono font-bold uppercase text-amber-300 bg-amber-500/15 border border-amber-500/50 rounded px-1.5 py-0.5 shrink-0 mt-px">
+                            <Lightbulb className="w-2.5 h-2.5" />
+                            <span>Fix</span>
+                          </span>
+                          <span className="text-[11px] text-amber-100 leading-relaxed">{d.suggestion}</span>
                         </div>
                       )}
                     </div>

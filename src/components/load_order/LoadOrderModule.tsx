@@ -2,8 +2,10 @@ import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { ModInfo, ModPreset, MissingModsReport } from '../../types';
 import { StudioPathsUI } from '../settings/SettingsModule';
 import { ConflictDiagnosticsPanel } from '../diagnostics/ConflictDiagnosticsPanel';
+import { SafeFixPanel } from '../diagnostics/SafeFixPanel';
 import { TauriService } from '../../services/tauri';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { InlineError } from '../common/InlineError';
 import {
   ListOrdered,
   RefreshCw,
@@ -205,6 +207,8 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
   const [showAutoSortNotice, setShowAutoSortNotice] = useState<boolean>(false);
   const [dontShowNoticeChecked, setDontShowNoticeChecked] = useState<boolean>(false);
   const [imageError, setImageError] = useState<boolean>(false);
+  /** Inline replacement for the old alert() calls; null renders nothing. */
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Preset & Profile Management State
   const [savedPresets, setSavedPresets] = useState<ModPreset[]>(() => {
@@ -228,8 +232,9 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
   const modRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const handleSaveCurrentAsPreset = () => {
+    setErrorMessage(null);
     if (!newPresetName.trim()) {
-      alert('Please enter a name for the preset.');
+      setErrorMessage('Give the preset a name before saving it.');
       return;
     }
     const newPreset: ModPreset = {
@@ -319,6 +324,7 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
     };
 
     setIsExportingPreset(true);
+    setErrorMessage(null);
     try {
       const defaultFileName = `${presetToExport.name.toLowerCase().replace(/[^a-z0-9]/g, '_')}.pzpack`;
       const filePath = await TauriService.pickSaveFile(defaultFileName, 'PZ Mod Studio Preset (.pzpack)', 'pzpack');
@@ -328,13 +334,14 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
         setTimeout(() => setSaveToast(null), 4000);
       }
     } catch (err: any) {
-      alert(`Error exporting preset: ${err}`);
+      setErrorMessage(`Could not export the preset: ${err?.message ? err.message : err}`);
     } finally {
       setIsExportingPreset(false);
     }
   };
 
   const handleImportPresetFile = async () => {
+    setErrorMessage(null);
     try {
       const filePath = await TauriService.pickOpenFile('PZ Mod Studio Preset (.pzpack)', 'pzpack');
       if (filePath) {
@@ -351,7 +358,7 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
         setIsPresetDropdownOpen(false);
       }
     } catch (err: any) {
-      alert(`Error importing .pzpack file: ${err}`);
+      setErrorMessage(`Could not import that .pzpack file: ${err?.message ? err.message : err}`);
     }
   };
 
@@ -1258,6 +1265,20 @@ export const LoadOrderModule: React.FC<LoadOrderModuleProps> = ({
           <span>{saveToast}</span>
         </div>
       )}
+
+      <InlineError
+        title="Mod List error"
+        message={errorMessage}
+        onDismiss={() => setErrorMessage(null)}
+        onRetry={handleRefresh}
+        retryLabel="Reload mod list"
+      />
+
+      {/* Safe Fix — preview repairs, confirm, apply, roll back. Nothing writes without a preview. */}
+      <SafeFixPanel
+        userZomboidDir={paths.user_zomboid_dir}
+        onJumpToMod={handleJumpToMod}
+      />
 
       {/* Conflict Diagnostics — cross-mod deep scan (duplicate ids, cycles, key collisions...) */}
       <ConflictDiagnosticsPanel
