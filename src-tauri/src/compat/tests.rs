@@ -20,6 +20,7 @@ fn manifest(id: &str, enabled: bool) -> ModManifest {
         is_map_mod: false,
         enabled,
         is_packaged: None,
+        inferred_require: Vec::new(),
     }
 }
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FixPlan, PlannedChange, FixKind, ApplyResult, BackupEntry, FIX_ERROR } from '../../types';
 import { TauriService } from '../../services/tauri';
 import type { LucideIcon } from 'lucide-react';
@@ -28,6 +28,7 @@ import {
   Undo2,
   Trash2,
   Layers,
+  Eye,
 } from 'lucide-react';
 
 interface SafeFixPanelProps {
@@ -56,9 +57,10 @@ interface KindStyle {
 }
 
 /**
- * Keys MUST match the Rust `FixKind` variant names — that enum carries no
- * `serde(rename_all)`, so the wire values are verbatim CamelCase variant names.
- * Unknown kinds fall back to Wrench rather than crashing.
+ * Keys MUST match the snake_case wire values of `FixKind` in
+ * `src-tauri/src/fixes/mod.rs` (that enum IS `#[serde(rename_all = "snake_case")]`,
+ * unlike `ConflictKind`/`Severity` next door — do not infer the casing from a
+ * sibling type). Unknown kinds fall back to Wrench rather than crashing.
  */
 const KIND_STYLES: Record<string, KindStyle> = {
   reorder_load_order: {
@@ -196,6 +198,25 @@ const diffPlans = (before: PlannedChange[], after: PlannedChange[]): ChangeDelta
   return { added, removed, modified, unchanged };
 };
 
+/**
+ * The single most important thing the operator must understand before pressing
+ * anything: previewing READS the mod folder, it never writes to it. This strip
+ * states that as a standing property of the preview surface rather than leaving
+ * it to be inferred from the absence of a button.
+ */
+const ReadOnlyNotice: React.FC<{ className?: string }> = ({ className = '' }) => (
+  <div
+    className={`flex items-start gap-2 bg-emerald-950/30 border border-emerald-800/50 px-3 py-2 ${className}`}
+  >
+    <Eye className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-px" />
+    <p className="text-[11px] text-emerald-100/90 leading-relaxed">
+      <b className="text-emerald-300">Preview only reads your mods.</b> Nothing has been written to disk.
+      The only action that changes files is <b className="text-emerald-300">Apply</b>, and it stays locked
+      until you tick the confirmation box.
+    </p>
+  </div>
+);
+
 const ChangeCard: React.FC<{
   change: PlannedChange;
   onJumpToMod?: (modId: string) => void;
@@ -263,10 +284,16 @@ const ChangeCard: React.FC<{
         </div>
       )}
 
-      {/* Target path */}
-      <div className="flex items-center gap-1.5 text-[9.5px] font-mono text-slate-400 min-w-0" title={change.target_path}>
-        <FileCode className="w-3 h-3 text-slate-500 shrink-0" />
-        <span className="truncate">{change.target_path || '(no path — logical change)'}</span>
+      {/* Target path — always shown, so the operator can see exactly which file an
+          Apply would touch before agreeing to it. */}
+      <div className="min-w-0">
+        <div className="text-[9px] font-mono text-slate-500 uppercase">would write to</div>
+        <div className="flex items-center gap-1.5 text-[9.5px] font-mono min-w-0" title={change.target_path}>
+          <FileCode className="w-3 h-3 text-amber-400/70 shrink-0" />
+          <span className={`truncate ${change.target_path ? 'text-slate-300' : 'text-slate-500 italic'}`}>
+            {change.target_path || 'no file path — this change is not a file write'}
+          </span>
+        </div>
       </div>
 
       {/* Backup destination */}
@@ -307,8 +334,6 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
 
   const [fixState, setFixState] = useState<FixState>('idle');
   const [plan, setPlan] = useState<FixPlan | null>(null);
-  /** Plan that the backend refused, kept so the re-preview can be diffed against it. */
-  const [stalePlan, setStalePlan] = useState<PlannedChange[] | null>(null);
   const [staleMessage, setStaleMessage] = useState<string>('');
   const [changeDelta, setChangeDelta] = useState<ChangeDelta | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -325,6 +350,21 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
 
   const missingDir = !userZomboidDir;
 
+  /**
+   * Monotonic token for preview requests. Every call bumps it and captures the
+   * value; the `finally`/commit paths only touch state when the captured token
+   * is still the newest one. That makes the guard cover all four ways a stale
+   * response could land: unmount, tab switch, a second manual click, and the
+   * automatic preview racing a manual one.
+   */
+  const previewTokenRef = useRef(0);
+
+  /** True once an automatic preview has fired, so it fires at most once per relevance. */
+  const autoPreviewFiredRef = useRef(false);
+
+  /** The refused plan, kept out of state (never rendered directly) so runPreview stays stable. */
+  const stalePlanRef = useRef<PlannedChange[] | null>(null);
+
   const runPreview = useCallback(async () => {
     if (!userZomboidDir) {
       setFixState('error');
@@ -332,24 +372,34 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
       return;
     }
 
+    const token = ++previewTokenRef.current;
+    const isCurrent = () => previewTokenRef.current === token;
+
     setFixState('loading');
     setErrorMessage(null);
     try {
       const next = await TauriService.previewModFixes(userZomboidDir);
+      // A newer preview (or an unmount) happened while this was in flight — drop it.
+      if (!isCurrent()) return;
+
       // Diff against the refused plan before swapping it out.
-      setChangeDelta((prev) => (stalePlan ? diffPlans(stalePlan, next.changes) : prev));
+      const refused = stalePlanRef.current;
+      if (refused) {
+        setChangeDelta(diffPlans(refused, next.changes));
+      }
       setPlan(next);
-      setStalePlan(null);
+      stalePlanRef.current = null;
       setStaleMessage('');
       setApplyResult(null);
       setConfirmed(false);
       setFixState('ready');
     } catch (err: any) {
+      if (!isCurrent()) return;
       console.error('Fix preview failed:', err);
       setErrorMessage(err?.message ? String(err.message) : String(err));
       setFixState('error');
     }
-  }, [userZomboidDir, stalePlan]);
+  }, [userZomboidDir]);
 
   const loadBackups = useCallback(async () => {
     if (!userZomboidDir) {
@@ -372,20 +422,59 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
     }
   }, [userZomboidDir]);
 
-  // Nothing is fetched on mount — the operator opens the panel and decides.
+  // A newly configured workspace resets everything and re-arms the automatic preview.
   useEffect(() => {
     if (!userZomboidDir) {
+      // Invalidate anything in flight so a late response can't repopulate a dead workspace.
+      previewTokenRef.current += 1;
+      autoPreviewFiredRef.current = false;
       setFixState('idle');
       setPlan(null);
-      setStalePlan(null);
+      stalePlanRef.current = null;
+      setStaleMessage('');
       setChangeDelta(null);
       setApplyResult(null);
+      setConfirmed(false);
       setErrorMessage(null);
       setBackupState('idle');
       setBackups([]);
       setBackupError(null);
     }
   }, [userZomboidDir]);
+
+  /**
+   * Automatic preview: fires once when the panel becomes relevant.
+   *
+   * `autoPreviewFiredRef` is the once-only latch (it survives re-renders because it
+   * is a ref, not state), and `previewTokenRef` makes a manual click racing this
+   * safe — whichever starts last wins and the other's response is discarded.
+   * It is deliberately skipped when a plan already exists, so it never clobbers
+   * something the operator is currently reading or has confirmed.
+   */
+  useEffect(() => {
+    if (!expanded || !userZomboidDir) return;
+    if (autoPreviewFiredRef.current) return;
+    if (plan) return;
+    if (fixState === 'applying') return;
+
+    autoPreviewFiredRef.current = true;
+    runPreview();
+  }, [expanded, userZomboidDir, plan, fixState, runPreview]);
+
+  // Collapsing invalidates an in-flight preview so its result cannot land unseen.
+  useEffect(() => {
+    if (!expanded) {
+      previewTokenRef.current += 1;
+    }
+  }, [expanded]);
+
+  // Unmount: same guard, so a late IPC response never calls setState on a dead panel.
+  useEffect(
+    () => () => {
+      previewTokenRef.current += 1;
+    },
+    []
+  );
 
   // Backups load the first time the operator switches to that view.
   useEffect(() => {
@@ -416,6 +505,11 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
     [plan]
   );
 
+  const reversibleCount = useMemo(
+    () => (plan ? plan.changes.length - nonReversibleCount : 0),
+    [plan, nonReversibleCount]
+  );
+
   const handleApply = async () => {
     if (!plan || !confirmed || !userZomboidDir) return;
 
@@ -433,7 +527,7 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
       if (refusal) {
         if (isStalePlanError(refusal)) {
           // Keep the refused plan around so the next preview can be compared to it.
-          setStalePlan(plan.changes);
+          stalePlanRef.current = plan.changes;
           setStaleMessage(refusal);
           setFixState('stale');
           return;
@@ -445,7 +539,7 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
       }
 
       setApplyResult(result);
-      setStalePlan(null);
+      stalePlanRef.current = null;
       setStaleMessage('');
       setFixState('applied');
       // A rollback point now exists — refresh history so it is visible.
@@ -459,7 +553,7 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
       setConfirmed(false);
       if (plan && isStalePlanError(message)) {
         // Keep the refused plan around so the next preview can be compared to it.
-        setStalePlan(plan.changes);
+        stalePlanRef.current = plan.changes;
         setStaleMessage(message);
         setFixState('stale');
       } else {
@@ -482,6 +576,21 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
       setRestoreOutcome({ id: entry.backup_id, message, ok: !failed });
       setPendingRestoreId(null);
       loadBackups();
+
+      if (!failed && result.restored.length > 0) {
+        // The mod list genuinely changed underneath: the old plan describes a
+        // state that no longer exists, so drop it and let the automatic
+        // preview rebuild from what is actually on disk now.
+        stalePlanRef.current = null;
+        setPlan(null);
+        setStaleMessage('');
+        setChangeDelta(null);
+        setApplyResult(null);
+        setConfirmed(false);
+        setErrorMessage(null);
+        setFixState('idle');
+        autoPreviewFiredRef.current = false;
+      }
     } catch (err: any) {
       const message = err?.message ? String(err.message) : String(err);
       setRestoreOutcome({ id: entry.backup_id, message, ok: false });
@@ -542,8 +651,8 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
           </span>
 
           <span className="flex items-center gap-1.5 text-[10px] text-slate-500 group-hover:text-slate-300 transition shrink-0">
-            <ScanLine className="w-3.5 h-3.5" />
-            <span>Preview repairs before anything is written</span>
+            <Eye className="w-3.5 h-3.5 text-emerald-500/70" />
+            <span>Read-only scan · nothing is written without your confirmation</span>
             <ChevronDown className="w-3.5 h-3.5" />
           </span>
         </button>
@@ -632,27 +741,33 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
       {/* ============================================================ PREVIEW VIEW */}
       {view === 'preview' && (
         <div className="max-h-[420px] overflow-y-auto">
-          {/* Idle — the default state. Nothing has been requested from the backend. */}
+          {/* Standing guarantee, visible in every preview state. */}
+          <ReadOnlyNotice className="border-b border-slate-800" />
+
+          {/* Idle: only reachable with no folder configured, or right after a restore
+              re-armed the automatic preview. */}
           {fixState === 'idle' && (
             <div className="px-4 py-8 flex flex-col items-center gap-2.5 text-center">
               <div className="w-11 h-11 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
                 <ShieldCheck className="w-5 h-5 text-emerald-400" />
               </div>
-              <p className="text-xs font-bold text-slate-200">Nothing has been changed yet</p>
+              <p className="text-xs font-bold text-slate-200">Nothing has been changed</p>
               <p className="text-[11px] text-slate-400 max-w-md leading-relaxed">
-                Safe Fix reads your mods and proposes repairs. Nothing is written until you read the whole
-                plan and confirm it.
+                Safe Fix reads your mods and proposes repairs. This scan is read-only — it inspects files and
+                never writes to them.
               </p>
-              <button
-                onClick={runPreview}
-                disabled={missingDir}
-                className="mt-1 flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded text-[10px] font-bold transition cursor-pointer shadow"
-              >
-                <ScanLine className="w-3.5 h-3.5" />
-                <span>Scan for fixes</span>
-              </button>
-              {missingDir && (
-                <p className="text-[10px] font-mono text-amber-400">Configure your Zomboid folder first.</p>
+              {missingDir ? (
+                <p className="text-[10px] font-mono text-amber-400 mt-1">
+                  Configure your Zomboid folder first — there is nothing to read yet.
+                </p>
+              ) : (
+                <button
+                  onClick={runPreview}
+                  className="mt-1 flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold transition cursor-pointer shadow"
+                >
+                  <ScanLine className="w-3.5 h-3.5" />
+                  <span>Scan for fixes</span>
+                </button>
               )}
             </div>
           )}
@@ -663,6 +778,7 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
               <p className="text-[11px] text-slate-400 font-mono">
                 Reading mod state and building a repair plan...
               </p>
+              <p className="text-[10px] font-mono text-emerald-400/70">read-only — no files are being written</p>
             </div>
           )}
 
@@ -776,9 +892,19 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
                 <div className="min-w-0 space-y-0.5">
                   <div className="text-[11px] font-bold text-slate-200">{plan.summary}</div>
                   <div className="text-[9px] font-mono text-slate-500">plan {plan.plan_id}</div>
+                  <div className="text-[9px] font-mono text-slate-600">
+                    would touch {plan.affected_files} file{plan.affected_files === 1 ? '' : 's'} · each one is
+                    listed below with its exact path
+                  </div>
                 </div>
-                <span className="flex items-center gap-1 shrink-0 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/50">
-                  NOT APPLIED
+                <span className="flex flex-col items-end gap-1 shrink-0">
+                  <span className="flex items-center gap-1 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border bg-emerald-500/15 text-emerald-300 border-emerald-500/40">
+                    <Eye className="w-2.5 h-2.5" />
+                    READ ONLY
+                  </span>
+                  <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border bg-amber-500/20 text-amber-300 border-amber-500/50">
+                    NOT APPLIED
+                  </span>
                 </span>
               </div>
 
@@ -832,29 +958,42 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
                         <b className="font-mono text-slate-100">{plan.changes.length}</b> change
                         {plan.changes.length === 1 ? '' : 's'} will be written, touching{' '}
                         <b className="font-mono text-slate-100">{plan.affected_files}</b> file
-                        {plan.affected_files === 1 ? '' : 's'} on disk.
-                      </span>
-                    </li>
-                    <li className="flex items-start gap-1.5 text-[11px] text-slate-300">
-                      <Archive className="w-3 h-3 text-emerald-400 shrink-0 mt-px" />
-                      <span>
-                        A backup of each original file is copied first, so the whole run can be rolled back from
-                        the Backups tab.
+                        {plan.affected_files === 1 ? '' : 's'} on disk. Every one of them is listed above with
+                        its exact path.
                       </span>
                     </li>
                     {nonReversibleCount > 0 ? (
-                      <li className="flex items-start gap-1.5 text-[11px] text-red-300">
-                        <AlertTriangle className="w-3 h-3 text-red-400 shrink-0 mt-px" />
-                        <span>
-                          <b className="font-mono">{nonReversibleCount}</b> of these change
-                          {nonReversibleCount === 1 ? '' : 's'} cannot be undone once written.
-                        </span>
-                      </li>
+                      <>
+                        <li className="flex items-start gap-1.5 text-[11px] text-red-300">
+                          <AlertTriangle className="w-3 h-3 text-red-400 shrink-0 mt-px" />
+                          <span>
+                            <b className="font-mono">{nonReversibleCount}</b> of these change
+                            {nonReversibleCount === 1 ? '' : 's'} cannot be undone once written. No backup is
+                            reserved for {nonReversibleCount === 1 ? 'it' : 'them'}.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-1.5 text-[11px] text-slate-300">
+                          <Archive className="w-3 h-3 text-emerald-400 shrink-0 mt-px" />
+                          <span>
+                            The other {reversibleCount} will have the original copied to a backup first, so
+                            those can be rolled back from the Backups tab.
+                          </span>
+                        </li>
+                      </>
                     ) : (
-                      <li className="flex items-start gap-1.5 text-[11px] text-emerald-300/90">
-                        <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0 mt-px" />
-                        <span>Every change in this plan is reversible.</span>
-                      </li>
+                      <>
+                        <li className="flex items-start gap-1.5 text-[11px] text-emerald-300/90">
+                          <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0 mt-px" />
+                          <span>Every change in this plan is reversible.</span>
+                        </li>
+                        <li className="flex items-start gap-1.5 text-[11px] text-slate-300">
+                          <Archive className="w-3 h-3 text-emerald-400 shrink-0 mt-px" />
+                          <span>
+                            A backup of each original file is copied first, so the whole run can be rolled back
+                            from the Backups tab.
+                          </span>
+                        </li>
+                      </>
                     )}
                   </ul>
                 </div>
@@ -882,7 +1021,7 @@ export const SafeFixPanel: React.FC<SafeFixPanelProps> = ({ userZomboidDir, onJu
                   <button
                     onClick={() => {
                       setPlan(null);
-                      setStalePlan(null);
+                      stalePlanRef.current = null;
                       setStaleMessage('');
                       setChangeDelta(null);
                       setApplyResult(null);

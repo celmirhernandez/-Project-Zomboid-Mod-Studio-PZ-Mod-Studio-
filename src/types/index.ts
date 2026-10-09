@@ -94,6 +94,13 @@ export interface ModInfo {
   poster_url?: string;
   url?: string;
   dependencies: string[]; // require= directives
+  /**
+   * `require=` entries PZ Mod Studio inferred from known-mod heuristics rather
+   * than reading them from the mod author's `mod.info`. Kept separate from
+   * `dependencies` so the UI can tell an author's real declaration apart from
+   * our own assumption. Additive on the wire.
+   */
+  inferred_require?: string[];
   load_mod_after?: string[]; // loadModAfter= directives (optional ordering hints)
   incompatible?: string[]; // incompatible= directives
   enabled: boolean;

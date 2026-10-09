@@ -92,6 +92,8 @@ pub fn read_resource_by_uri(uri: &str) -> Result<ResourceReadResult, String> {
             })
         }
         "pz://mods/installed-summary" => {
+            // Read-only scan: reading a resource must never modify the
+            // user's mod folders.
             let manifests = scan_all_installed_mods(&paths);
             let json_str = serde_json::to_string_pretty(&json!({
                 "total_installed": manifests.len(),

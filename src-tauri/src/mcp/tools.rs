@@ -529,6 +529,8 @@ fn handle_get_crash_diagnostics(args: Value) -> ToolCallResult {
 
 fn handle_list_installed_mods(args: Value) -> ToolCallResult {
     let paths = resolve_paths(&args);
+    // Read-only scan: an agent asking "what is installed?" must not have that
+    // question rewrite the user's mod folders as a side effect.
     let manifests = scan_all_installed_mods(&paths);
 
     ToolCallResult {
@@ -546,6 +548,8 @@ fn handle_list_installed_mods(args: Value) -> ToolCallResult {
 
 fn handle_sort_mod_load_order(args: Value) -> ToolCallResult {
     let paths = resolve_paths(&args);
+    // Read-only scan; this tool only computes a proposed order, it does not
+    // apply one, so it must not touch the mod folders either.
     let manifests = scan_all_installed_mods(&paths);
     let analysis = sort_dependencies_topologically(&manifests);
 
@@ -580,6 +584,7 @@ fn handle_scan_mod_diagnostics(args: Value) -> ToolCallResult {
     // Graceful scan: a mod we cannot read is reported in `scan_errors` instead of
     // aborting the whole scan, so one broken `mod.info` cannot hide every other
     // mod from an agent.
+    // Read-only: an MCP tool must never mutate the user's mod folders.
     let report = crate::load_order::mod_info::scan_all_installed_mods_with_errors(&paths);
     let rules = crate::compat::global_rules();
     let diagnostics = crate::conflicts::analyze_with_compat(&report.all_installs, rules, None);

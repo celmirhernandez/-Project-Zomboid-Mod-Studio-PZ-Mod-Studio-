@@ -73,6 +73,7 @@ fn write_mod_list_ini_cmd(ini_path: String, active_mods: Vec<String>) -> Result<
 
 #[tauri::command]
 fn scan_all_installed_mods_cmd(paths: StudioPaths) -> Vec<ModManifest> {
+    // Read-only: listing mods must not rewrite them.
     scan_all_installed_mods(&paths)
 }
 
@@ -123,6 +124,11 @@ fn resolve_paths_for(user_zomboid_dir: &str) -> StudioPaths {
 }
 
 /// Scan, analyze, and report per-mod read failures instead of swallowing them.
+///
+/// **Must not write.** `scan_all_installed_mods_with_errors` defaults to
+/// [`ScanMode::ReadOnly`], so opening the diagnostics panel no longer
+/// auto-installs the Live Bridge companion mod or rewrites `mod.info` in the
+/// user's build-42 folders. See `load_order::mod_info::ScanMode`.
 pub fn scan_diagnostics_report(user_zomboid_dir: String) -> ModDiagnosticsReport {
     let paths = resolve_paths_for(&user_zomboid_dir);
     let report = load_order::mod_info::scan_all_installed_mods_with_errors(&paths);

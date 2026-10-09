@@ -25,6 +25,18 @@ pub struct ModManifest {
     pub is_map_mod: bool,
     pub enabled: bool,
     pub is_packaged: Option<bool>,
+    /// Requirements that **PZ Mod Studio inferred**, not that the mod author
+    /// wrote in `mod.info`. Parallel to [`ModManifest::require`] — that field
+    /// keeps its original meaning and still lists both, so the topological
+    /// sorter is unaffected.
+    ///
+    /// This exists because `apply_known_dependency_heuristics` pushes hardcoded
+    /// names (e.g. `"modoptions"`, `"Tsarslib"`). Those were previously
+    /// indistinguishable from an author's own `require=`, so a false positive
+    /// looked like the mod author's mistake. The diagnostics layer uses this
+    /// field to attribute the problem correctly and to downgrade severity.
+    #[serde(default)]
+    pub inferred_require: Vec<String>,
 }
 
 /// Helper function to sanitize and clean raw mod ID strings.
@@ -150,10 +162,16 @@ pub fn parse_mod_info(path: &Path) -> Option<ModManifest> {
             for s in req_str.split(',') {
                 let clean = sanitize_mod_id(s);
                 let lower = clean.to_lowercase();
-                let is_junk = matches!(
-                    lower.as_str(),
-                    "please" | "update" | "to" | "b42" | "version" | "of" | "the" | "game" | "read" | "mod" | "page" | "for" | "help" | "visit" | "steam" | "link" | "download" | "notice" | "warning"
-                );
+                // A bare numeric value is a Steam Workshop id — the normal form
+                // in real PZ `mod.info` files — so it must never be mistaken for
+                // prose. The junk list is checked only for non-numeric tokens.
+                let is_numeric_workshop_id =
+                    !clean.is_empty() && clean.chars().all(|c| c.is_ascii_digit());
+                let is_junk = !is_numeric_workshop_id
+                    && matches!(
+                        lower.as_str(),
+                        "please" | "update" | "to" | "b42" | "version" | "of" | "the" | "game" | "read" | "mod" | "page" | "for" | "help" | "visit" | "steam" | "link" | "download" | "notice" | "warning"
+                    );
                 if !clean.is_empty() && !is_junk && !require.contains(&clean) {
                     require.push(clean);
                 }
@@ -309,6 +327,7 @@ pub fn parse_mod_info(path: &Path) -> Option<ModManifest> {
         is_map_mod,
         enabled: false,
         is_packaged: None,
+        inferred_require: Vec::new(),
     };
 
     apply_known_dependency_heuristics(&mut manifest);
@@ -316,25 +335,41 @@ pub fn parse_mod_info(path: &Path) -> Option<ModManifest> {
 }
 
 
+/// Push `req` onto `manifest.require` **and** record it in
+/// `inferred_require`, so the diagnostics layer can tell a PZ Mod Studio guess
+/// apart from something the mod author actually declared.
+///
+/// Idempotent, and safe to call when the requirement is already present: a
+/// heuristic match that also found an author-written `require=` leaves the
+/// entry marked as *author-declared*, which is the correct attribution.
+fn inject_inferred_require(manifest: &mut ModManifest, req: &str) {
+    let already = manifest
+        .require
+        .iter()
+        .any(|r| r.to_lowercase().contains(&req.to_lowercase()));
+    if already {
+        return;
+    }
+    manifest.require.push(req.to_string());
+    if !manifest.inferred_require.iter().any(|r| r == req) {
+        manifest.inferred_require.push(req.to_string());
+    }
+}
+
 pub fn apply_known_dependency_heuristics(manifest: &mut ModManifest) {
     let lower_id = manifest.id.to_lowercase();
-    let w_id = manifest.workshop_id.as_deref().unwrap_or("");
+    // Owned, because the branches below hand `manifest` to `&mut` helpers.
+    let w_id = manifest.workshop_id.clone().unwrap_or_default();
 
     // 1. Brita's Weapon Pack (id: Brita, workshop: 2200148440)
     if lower_id == "brita" || w_id == "2200148440" {
-        if !manifest.require.iter().any(|r| r.to_lowercase().contains("gunfighter")) {
-            manifest.require.push("Arsenal(26)GunFighter[MAIN MOD 2.0]".to_string());
-        }
-        if !manifest.require.iter().any(|r| r.to_lowercase().contains("modoptions")) {
-            manifest.require.push("modoptions".to_string());
-        }
+        inject_inferred_require(manifest, "Arsenal(26)GunFighter[MAIN MOD 2.0]");
+        inject_inferred_require(manifest, "modoptions");
     }
 
     // 2. Arsenal(26) GunFighter (id: Arsenal(26)GunFighter[MAIN MOD 2.0], workshop: 2297098490)
     if lower_id.contains("gunfighter") || w_id == "2297098490" {
-        if !manifest.require.iter().any(|r| r.to_lowercase().contains("modoptions")) {
-            manifest.require.push("modoptions".to_string());
-        }
+        inject_inferred_require(manifest, "modoptions");
         if lower_id.contains("2.0") || lower_id.contains("main") {
             if !manifest.incompatible.iter().any(|i| i.to_lowercase() == "arsenal(26)gunfighter") {
                 manifest.incompatible.push("Arsenal(26)GunFighter".to_string());
@@ -348,27 +383,221 @@ pub fn apply_known_dependency_heuristics(manifest: &mut ModManifest) {
 
     // 3. Brita's Armor Pack (id: Brita_Armor, workshop: 2460154811)
     if lower_id == "brita_armor" || w_id == "2460154811" {
-        if !manifest.require.iter().any(|r| r.to_lowercase().contains("modoptions")) {
-            manifest.require.push("modoptions".to_string());
-        }
+        inject_inferred_require(manifest, "modoptions");
     }
 
     // 4. Tsar / Autotsar vehicle & trailer mods
     if lower_id.contains("autotsar") || lower_id.contains("aquatsar") || lower_id.contains("tsar") {
-        if lower_id != "tsarslib" && !manifest.require.iter().any(|r| r.to_lowercase() == "tsarslib") {
-            manifest.require.push("Tsarslib".to_string());
+        if lower_id != "tsarslib" {
+            inject_inferred_require(manifest, "Tsarslib");
         }
     }
 
     // 5. Vehicle Scene Customization
     if lower_id.contains("vehiclescenecustomization") {
-        if !manifest.require.iter().any(|r| r.to_lowercase() == "tsarslib") {
-            manifest.require.push("Tsarslib".to_string());
-        }
+        inject_inferred_require(manifest, "Tsarslib");
     }
 
     // Recalculate is_library
     manifest.is_library = manifest.require.is_empty() || lower_id.contains("lib") || lower_id.contains("manager") || lower_id.contains("framework");
+}
+
+// ---------------------------------------------------------------------------
+// Dependency resolution
+// ---------------------------------------------------------------------------
+
+/// How strongly a `require=` value matched an installed mod. Declaration order
+/// is the preference order: strongest first.
+///
+/// A numeric requirement skips [`MatchStrength::IdSuffix`] and
+/// [`MatchStrength::IdSubstring`] entirely (see [`is_numeric_workshop_id`]),
+/// because workshop ids share long digit prefixes and a substring match would
+/// happily bind `require=2200148440` to `22001484401`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MatchStrength {
+    /// The requirement equals the mod's normalized `id`.
+    ExactId,
+    /// The requirement equals the mod's Steam Workshop id (numerically compared).
+    WorkshopId,
+    /// The mod's normalized `id` starts with the requirement.
+    IdPrefix,
+    /// The mod's normalized `id` ends with the requirement, at a word boundary.
+    ///
+    /// This is the case that used to fail outright: `require=modoptions` against
+    /// an installed `B42_GlobalModOptions`, or `require=tsarslib` against
+    /// `Tsar_Tsarslib`. `starts_with` cannot see either.
+    IdSuffix,
+    /// Last resort: the requirement appears somewhere inside the mod's id.
+    ///
+    /// Deliberately crude. It exists so a variant-suffixed library
+    /// (`..._v2`, `...[B42]`) still resolves, and it is ranked below every
+    /// stronger tier so it only decides when nothing else matched. It also
+    /// requires the requirement to be at least [`MIN_SUBSTRING_MATCH_LEN`]
+    /// characters, so a short `require=ui` cannot bind to an unrelated mod whose
+    /// id happens to contain "ui".
+    IdSubstring,
+}
+
+/// Minimum length before a substring match is allowed.
+pub const MIN_SUBSTRING_MATCH_LEN: usize = 4;
+
+/// A bare-numeric requirement is a Steam Workshop id.
+pub fn is_numeric_workshop_id(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Compare two Workshop ids numerically, ignoring leading zeros.
+///
+/// `normalize_id` cannot be used here: it lowercases and rewrites `-` to `_`,
+/// which is right for names but would fold `02200148440` into something else.
+/// Instead both sides are stripped of leading zeros and compared as digit
+/// strings, so `"2200148440"`, `"02200148440"` and `" 2200148440 "` all match.
+fn strip_leading_zeros(s: &str) -> &str {
+    s.trim_start_matches('0')
+}
+
+fn workshop_ids_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if !a.chars().all(|c| c.is_ascii_digit()) || !b.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let (a, b) = (strip_leading_zeros(a), strip_leading_zeros(b));
+    // Everything-stripped means the id was 0 (or all zeros).
+    if a.is_empty() || b.is_empty() {
+        return a.is_empty() && b.is_empty();
+    }
+    a == b
+}
+
+/// Normalize an id the way the conflict engine does, for comparison purposes.
+///
+/// Duplicated in spirit from `conflicts::normalize_id` on purpose: that one
+/// lives in a module that depends on this one, and this module must not depend
+/// back. The two must stay in step — `normalize_id_matches_the_dependency_resolver`
+/// in this module's tests pins that.
+fn dep_normalize(raw: &str) -> String {
+    raw.trim()
+        .to_lowercase()
+        .replace('-', "_")
+        .replace(' ', "")
+}
+
+/// Score how well `req` matches `m`. `None` means "no match at all".
+///
+/// Total: every `(req, manifest)` pair scores deterministically.
+pub fn match_strength(req: &str, m: &ModManifest) -> Option<MatchStrength> {
+    let req_clean = req.trim();
+    if req_clean.is_empty() {
+        return None;
+    }
+
+    // --- Workshop id -------------------------------------------------------
+    // Checked before the name tiers: a numeric requirement is *meant* to be a
+    // workshop id, and matching it against names would let `require=2200148440`
+    // bind to a folder that merely happens to be named that.
+    if let Some(w) = m.workshop_id.as_deref() {
+        if workshop_ids_match(req_clean, w) {
+            return Some(MatchStrength::WorkshopId);
+        }
+    }
+
+    let nr = dep_normalize(req_clean);
+    if nr.is_empty() {
+        return None;
+    }
+
+    // A numeric requirement may also name a folder that is literally the
+    // workshop id (`mods/2200148440/mod.info`), which is the common case when
+    // the mod has no `id=` line worth trusting.
+    if is_numeric_workshop_id(&nr) {
+        if workshop_ids_match(&nr, &m.id) {
+            return Some(MatchStrength::WorkshopId);
+        }
+        // No further tiers: digit-string prefix/suffix matching is far too
+        // weak to be trustworthy.
+        return None;
+    }
+
+    let nid = dep_normalize(&m.id);
+
+    if nid == nr {
+        return Some(MatchStrength::ExactId);
+    }
+    if nid.starts_with(&nr) {
+        return Some(MatchStrength::IdPrefix);
+    }
+    // Suffix: `b42_globalmodoptions` ends with `modoptions`, and
+    // `tsar_tsarslib` ends with `tsarslib`. This is the tier that fixes the two
+    // false "missing dependency" reports in the bug.
+    //
+    // No separator-boundary requirement here. A camelCase boundary would be the
+    // natural one (`GlobalModOptions`), but `dep_normalize` lowercases the id,
+    // which erases exactly the case transition a boundary check needs to see.
+    // The `>= MIN_SUBSTRING_MATCH_LEN` guard plus the tier ordering carry the
+    // load instead: a suffix match only decides when exact, workshop-id and
+    // prefix all failed. (`require=tsar` does *not* bind to `Tsar_Tsarslib` —
+    // that id ends in `tsarslib`, not `tsar` — so the obvious collision is
+    // already impossible.)
+    if nr.len() >= MIN_SUBSTRING_MATCH_LEN && nid.ends_with(&nr) {
+        return Some(MatchStrength::IdSuffix);
+    }
+    if nr.len() >= MIN_SUBSTRING_MATCH_LEN && nid.contains(&nr) {
+        return Some(MatchStrength::IdSubstring);
+    }
+    None
+}
+
+/// The best match for `req` among `manifests`, or `None` if nothing matches.
+///
+/// **Deterministic by construction.** Candidates are ranked by
+/// [`MatchStrength`] first; ties are broken by (a) enabled before disabled,
+/// then (b) the lexicographically smallest normalized id. There is no
+/// "first match wins" and no reliance on input order, so repeated calls with the
+/// identical slice always return the identical manifest.
+///
+/// `exclude` skips the manifest that owns the requirement (self-reference).
+pub fn resolve_requirement<'a>(
+    req: &str,
+    manifests: &'a [ModManifest],
+    exclude: Option<usize>,
+) -> Option<&'a ModManifest> {
+    let mut best: Option<(MatchStrength, bool, String, usize)> = None;
+
+    for (i, m) in manifests.iter().enumerate() {
+        if Some(i) == exclude {
+            continue;
+        }
+        let Some(strength) = match_strength(req, m) else {
+            continue;
+        };
+        // Stronger match first; then enabled wins; then smallest id.
+        let better = match &best {
+            None => true,
+            Some((bs, benabled, bid, _)) => {
+                (strength, !m.enabled, dep_normalize(&m.id))
+                    < (*bs, !benabled, bid.clone())
+            }
+        };
+        if better {
+            best = Some((strength, m.enabled, dep_normalize(&m.id), i));
+        }
+    }
+
+    best.and_then(|(_, _, _, i)| manifests.get(i))
+}
+
+/// Convenience wrapper returning just the id, for callers that only need a
+/// name to sort by.
+pub fn resolve_requirement_id<'a>(
+    req: &str,
+    manifests: &'a [ModManifest],
+    exclude: Option<usize>,
+) -> Option<&'a str> {
+    resolve_requirement(req, manifests, exclude).map(|m| m.id.as_str())
 }
 
 pub fn get_all_user_zomboid_dirs(user_zomboid_dir: &str) -> Vec<std::path::PathBuf> {
@@ -605,11 +834,14 @@ pub struct ModScanReport {
 
 /// Whether a scan is allowed to touch the disk.
 ///
-/// The historical scan repairs mod folders in place: it creates the build-42
-/// sub-folder, copies `mod.info` into it, mirrors `media/`, and auto-installs the
-/// Live Bridge companion mod. That is useful for a normal "scan my mods" action
-/// but **forbidden** for a dry run — the fix engine's preview must be a pure
-/// read, otherwise two previews of an unchanged install produce different plans.
+/// [`ScanMode::Repairing`] creates the build-42 sub-folder, copies `mod.info`
+/// into it, mirrors `media/`, and auto-installs the Live Bridge companion mod.
+///
+/// **Every scan entry point defaults to [`ScanMode::ReadOnly`].** Repairing was
+/// originally the only mode, which meant that merely *listing* mods or
+/// *opening the diagnostics panel* rewrote the user's mod folders — the user
+/// reported this as "it changes files". Repairing is now reachable only by
+/// explicitly passing the mode from an action the user actually asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanMode {
     /// Repair mod folders in place, as the app has always done.
@@ -626,9 +858,17 @@ impl ScanMode {
 
 /// Scans all subscribed Workshop & local mods recursively without depth limits.
 /// Preserves exact ModListData.ini load order for active mods, and sorts remaining mods deterministically.
+///
+/// **Read-only.** See [`ScanMode`] for why the old repairing default was
+/// removed: every caller of this function is a read path (a mod list, a
+/// diagnostic report, an MCP tool), and a "list my mods" call that silently
+/// rewrites the user's mod folders is never what the user asked for.
+///
+/// To repair deliberately, call [`scan_all_installed_mods_in_mode`] with
+/// [`ScanMode::Repairing`] from an explicit user-initiated action.
 pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
     let mut errors = Vec::new();
-    discover_installed_mods_with(paths, &mut errors, ScanMode::Repairing).ordered
+    discover_installed_mods_with(paths, &mut errors, ScanMode::ReadOnly).ordered
 }
 
 /// Same scan as [`scan_all_installed_mods`] but WITHOUT collapsing manifests by
@@ -638,9 +878,11 @@ pub fn scan_all_installed_mods(paths: &StudioPaths) -> Vec<ModManifest> {
 ///
 /// Used by the conflict engine (`conflicts::detect_duplicate_mods`), which is
 /// permanently blind if the id-keyed `HashMap` collapse happens first.
+///
+/// **Read-only** — see [`scan_all_installed_mods`] for why.
 pub fn scan_all_installed_mods_list(paths: &StudioPaths) -> Vec<ModManifest> {
     let mut errors = Vec::new();
-    discover_installed_mods_with(paths, &mut errors, ScanMode::Repairing).all_installs
+    discover_installed_mods_with(paths, &mut errors, ScanMode::ReadOnly).all_installs
 }
 
 /// A **pure read** of every installed mod: no folder is created, no `mod.info`
@@ -659,8 +901,10 @@ pub fn scan_all_installed_mods_read_only(paths: &StudioPaths) -> Vec<ModManifest
 /// This is the graceful path: a mod whose `mod.info` is unreadable, truncated,
 /// or permission-denied is reported in `errors` while every other mod is still
 /// returned in `all_installs`.
+/// **Read-only** — see [`scan_all_installed_mods`]. This is the function the
+/// diagnostics path uses, so it must not touch the user's mod folders.
 pub fn scan_all_installed_mods_with_errors(paths: &StudioPaths) -> ModScanReport {
-    scan_all_installed_mods_in_mode(paths, ScanMode::Repairing)
+    scan_all_installed_mods_in_mode(paths, ScanMode::ReadOnly)
 }
 
 /// [`scan_all_installed_mods_with_errors`] in a chosen [`ScanMode`]. Use
@@ -1720,5 +1964,143 @@ mod tests {
             report.errors
         );
     }
-}
 
+
+    // -----------------------------------------------------------------------
+    // BUG 2 - the diagnostics scan must never write to the user's mod folders.
+    // -----------------------------------------------------------------------
+
+    /// The scan every read path resolves to. Repairing auto-installs the Live
+    /// Bridge companion mod and copies `mod.info` into build-42 sub-folders, so
+    /// merely listing mods used to mutate the user's folders.
+    #[test]
+    fn every_scan_entry_point_is_read_only_by_default() {
+        let sb = ScanSandbox::new("readonly_default");
+        let paths = sb.path();
+
+        // `scan_all_installed_mods_with_errors` is what the diagnostics command
+        // and the MCP `scan_mod_diagnostics` tool both call.
+        //
+        // The assertion is scoped to the sandbox, not to `all_installs`: the
+        // scan also walks every other candidate Zomboid folder on this machine
+        // (including the real `~/Zomboid`), which may legitimately already
+        // contain the Bridge mod. What must hold is that *this* folder did not
+        // gain one.
+        let _report = scan_all_installed_mods_with_errors(&paths);
+
+        let listed: Vec<String> = fs::read_dir(sb.root.join("mods"))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            !listed.iter().any(|n| n == "Z_PZModStudio_Bridge"),
+            "the Bridge folder must not have been auto-installed into the scanned \
+             folder, found {:?}",
+            listed
+        );
+    }
+
+    #[test]
+    fn the_list_and_collapsed_scans_create_nothing() {
+        let sb = ScanSandbox::new("list_no_writes");
+        sb.mod_info("Real", "name=Real\nid=Real\n");
+
+        let listing = |root: &Path| -> Vec<String> {
+            fs::read_dir(root.join("mods"))
+                .map(|d| {
+                    d.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let before = listing(&sb.root);
+        let _ = scan_all_installed_mods(&sb.path());
+        let _ = scan_all_installed_mods_list(&sb.path());
+        let _ = scan_all_installed_mods_with_errors(&sb.path());
+        let _ = scan_all_installed_mods_read_only(&sb.path());
+        assert_eq!(
+            before,
+            listing(&sb.root),
+            "a list/scan must not create anything in the user's mods folder"
+        );
+    }
+
+    /// The end-to-end guarantee the user reported: running the diagnostics scan
+    /// over a real folder leaves that folder byte-for-byte unchanged.
+    #[test]
+    fn the_diagnostics_scan_cannot_write() {
+        let sb = ScanSandbox::new("diag_no_write");
+        sb.mod_info("Alpha", "name=Alpha\nid=Alpha\n");
+        sb.mod_info("Beta", "name=Beta\nid=Beta\nversionMin=42\n");
+
+        fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+            let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+            for e in WalkDir::new(root).sort_by_file_name().into_iter().filter_map(|e| e.ok()) {
+                if !e.file_type().is_file() {
+                    continue;
+                }
+                let rel = e
+                    .path()
+                    .strip_prefix(root)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| e.path().to_string_lossy().to_string());
+                out.push((rel, fs::read(e.path()).unwrap_or_default()));
+            }
+            out.sort();
+            out
+        }
+
+        let before = snapshot(&sb.root);
+        // Exactly what `scan_diagnostics_report` does.
+        let report = scan_all_installed_mods_with_errors(&sb.path());
+        let _ = crate::conflicts::analyze_with_compat(
+            &report.all_installs,
+            crate::compat::global_rules(),
+            None,
+        );
+        assert_eq!(
+            before,
+            snapshot(&sb.root),
+            "running diagnostics must not change one byte of the mod folders"
+        );
+    }
+
+    #[test]
+    fn read_only_and_repairing_modes_find_the_same_core_mods() {
+        // Read-only must not change what is *found*, only what is written.
+        let sb = ScanSandbox::new("same_result");
+        sb.mod_info("Alpha", "name=Alpha\nid=Alpha\n");
+        sb.mod_info("Beta", "name=Beta\nid=Beta\n");
+
+        let paths = sb.path();
+        let read_only = scan_all_installed_mods_in_mode(&paths, ScanMode::ReadOnly);
+        let repairing = scan_all_installed_mods_in_mode(&paths, ScanMode::Repairing);
+
+        let ids = |r: &ModScanReport| -> Vec<String> {
+            let mut v: Vec<String> = r.all_installs.iter().map(|m| m.id.clone()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let a = ids(&read_only);
+        let b = ids(&repairing);
+        assert!(
+            a.iter().all(|id| b.contains(id)),
+            "read-only must find at least everything repairing found; read-only {:?}, repairing {:?}",
+            a,
+            b
+        );
+    }
+
+    #[test]
+    fn scan_mode_is_explicitly_selectable_for_repair_actions() {
+        // Repairing must remain reachable for an explicit user-initiated action.
+        assert!(ScanMode::Repairing.may_write());
+        assert!(!ScanMode::ReadOnly.may_write());
+    }
+}

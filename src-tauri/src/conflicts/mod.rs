@@ -74,22 +74,34 @@ fn display_name(m: &ModManifest) -> String {
     }
 }
 
-/// Exact normalized match first, then prefix match (mirrors `topological_sort`).
-fn find_by_id<'a>(manifests: &'a [ModManifest], needle: &str) -> Option<&'a ModManifest> {
-    let n = normalize_id(needle);
-    if n.is_empty() {
-        return None;
-    }
-    if let Some(m) = manifests.iter().find(|m| normalize_id(&m.id) == n) {
-        return Some(m);
-    }
-    manifests
+/// Resolve a `require=` value against the installed mods.
+///
+/// Delegates to [`crate::load_order::mod_info::resolve_requirement`], the same
+/// resolver the topological sorter uses, so "the conflict engine says this
+/// dependency is missing" and "the sorter says it is unresolvable" can never
+/// disagree — the old local copy here only knew `id` + `starts_with`, which is
+/// how a required-but-installed mod got reported as missing.
+///
+/// `exclude_index` is the index of the mod that owns the requirement.
+fn find_by_id<'a>(
+    manifests: &'a [ModManifest],
+    needle: &str,
+    exclude_index: Option<usize>,
+) -> Option<&'a ModManifest> {
+    crate::load_order::mod_info::resolve_requirement(needle, manifests, exclude_index)
+}
+
+/// Was this requirement injected by PZ Mod Studio rather than declared by the
+/// mod author? See [`ModManifest::inferred_require`].
+///
+/// The heuristic records the exact string it pushed, so a plain
+/// case-insensitive membership test is enough. A requirement the author wrote
+/// themselves is never marked, even if the heuristic also "knows" about it —
+/// `inject_inferred_require` refuses to mark an already-present entry.
+fn is_inferred(m: &ModManifest, req: &str) -> bool {
+    m.inferred_require
         .iter()
-        .filter(|m| {
-            let mid = normalize_id(&m.id);
-            !mid.is_empty() && mid.starts_with(&n)
-        })
-        .min_by_key(|m| normalize_id(&m.id))
+        .any(|r| r.trim().eq_ignore_ascii_case(req.trim()))
 }
 
 /// Split a version string into numeric segments. Junk counts as 0.
@@ -272,16 +284,35 @@ pub fn detect_duplicate_mods(manifests: &[ModManifest]) -> Vec<ModDiagnostic> {
         .collect()
 }
 
+/// The attribution suffix appended to `detail` when a requirement came from
+/// PZ Mod Studio's heuristics rather than the mod author.
+pub const INFERRED_NOTE: &str = " (inferred by PZ Mod Studio, not declared by the mod author)";
+
 /// Only `require` is checked, matching the existing sorter's behavior.
+///
+/// Resolution is delegated to the shared resolver, so a `require=` value that
+/// names a Steam Workshop id, or is a suffix of the installed mod's id, now
+/// resolves instead of producing a false "missing dependency".
+///
+/// **Severity**: an author-declared requirement that cannot be resolved is an
+/// `Error` (the mod really will break). An *inferred* requirement that cannot be
+/// resolved is only a `Warning` — we guessed that name, so we do not get to
+/// call it the author's mistake — and its `detail` says so.
 pub fn detect_missing_dependencies(manifests: &[ModManifest]) -> Vec<ModDiagnostic> {
     let mut out: Vec<ModDiagnostic> = Vec::new();
-    for m in manifests {
+    for (i, m) in manifests.iter().enumerate() {
         for req in &m.require {
             let nr = normalize_id(req);
             if nr.is_empty() || nr == normalize_id(&m.id) {
                 continue;
             }
-            match find_by_id(manifests, req) {
+            let inferred = is_inferred(m, req);
+            let detail = if inferred {
+                format!("require={}{}", req.trim(), INFERRED_NOTE)
+            } else {
+                format!("require={}", req.trim())
+            };
+            match find_by_id(manifests, req, Some(i)) {
                 Some(target) if !target.enabled => out.push(ModDiagnostic {
                     kind: ConflictKind::MissingDependency,
                     severity: Severity::Warning,
@@ -296,29 +327,60 @@ pub fn detect_missing_dependencies(manifests: &[ModManifest]) -> Vec<ModDiagnost
                     mod_ids: vec![m.id.clone()],
                     related_mod_ids: vec![target.id.clone()],
                     file_path: None,
-                    detail: Some(format!("require={}", req.trim())),
+                    detail: Some(detail),
                     suggestion: Some(format!("Switch on {} in the mod list.", target.id)),
                 }),
                 Some(_) => {}
-                None => out.push(ModDiagnostic {
-                    kind: ConflictKind::MissingDependency,
-                    severity: Severity::Error,
-                    title: "A required mod is missing".to_string(),
-                    cause: format!(
-                        "{} needs {}, but that mod is not installed anywhere on this computer. \
-                         Without it the game can crash while loading.",
-                        display_name(m),
-                        req.trim()
-                    ),
-                    mod_ids: vec![m.id.clone()],
-                    related_mod_ids: vec![req.trim().to_string()],
-                    file_path: None,
-                    detail: Some(format!("require={}", req.trim())),
-                    suggestion: Some(format!(
-                        "Install {} from the Workshop, then rescan your mods.",
-                        req.trim()
-                    )),
-                }),
+                None => {
+                    let suggestion = if inferred {
+                        format!(
+                            "This name was guessed by PZ Mod Studio, not written by the mod author, \
+                             so it may be safe to ignore. If {} really does need it, install {} \
+                             from the Workshop.",
+                            display_name(m),
+                            req.trim()
+                        )
+                    } else {
+                        format!(
+                            "Install {} from the Workshop, then rescan your mods.",
+                            req.trim()
+                        )
+                    };
+                    let cause = if inferred {
+                        format!(
+                            "{} is expected to need {}, but that is a name PZ Mod Studio inferred \
+                             rather than one the mod author declared, and no installed mod matches it.",
+                            display_name(m),
+                            req.trim()
+                        )
+                    } else {
+                        format!(
+                            "{} needs {}, but that mod is not installed anywhere on this computer. \
+                             Without it the game can crash while loading.",
+                            display_name(m),
+                            req.trim()
+                        )
+                    };
+                    out.push(ModDiagnostic {
+                        kind: ConflictKind::MissingDependency,
+                        severity: if inferred {
+                            Severity::Warning
+                        } else {
+                            Severity::Error
+                        },
+                        title: if inferred {
+                            "An inferred dependency does not match any installed mod".to_string()
+                        } else {
+                            "A required mod is missing".to_string()
+                        },
+                        cause,
+                        mod_ids: vec![m.id.clone()],
+                        related_mod_ids: vec![req.trim().to_string()],
+                        file_path: None,
+                        detail: Some(detail),
+                        suggestion: Some(suggestion),
+                    })
+                }
             }
         }
     }
@@ -388,18 +450,18 @@ pub fn find_dependency_cycles(manifests: &[ModManifest]) -> Vec<Vec<String>> {
         };
         let mut deps: Vec<usize> = Vec::new();
         for dep in m.require.iter().chain(m.load_mod_after.iter()) {
-            let nd = normalize_id(dep);
             // Self-edges are kept here on purpose: a mod requiring itself is a
             // real one-node cycle. (Missing-dependency skips them separately.)
-            if nd.is_empty() {
+            // Hence `exclude: None` — we deliberately allow matching the owner.
+            if normalize_id(dep).is_empty() {
                 continue;
             }
-            let resolved = index.get(&nd).copied().or_else(|| {
-                ids.iter()
-                    .filter(|id| id.starts_with(&nd))
-                    .min()
-                    .and_then(|id| index.get(id).copied())
-            });
+            // Shared resolver, so cycle detection cannot disagree with
+            // `detect_missing_dependencies` or the load-order sorter about what a
+            // requirement points at. This used to re-implement exact+prefix
+            // matching locally, which missed workshop-id and suffix matches.
+            let resolved = crate::load_order::mod_info::resolve_requirement(dep, manifests, None)
+                .and_then(|target| index.get(&normalize_id(&target.id)).copied());
             if let Some(v) = resolved {
                 if !deps.contains(&v) {
                     deps.push(v);

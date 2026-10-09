@@ -1,4 +1,4 @@
-use super::mod_info::{sanitize_mod_id, ModManifest};
+use super::mod_info::{resolve_requirement_id, ModManifest};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::iter::FromIterator;
@@ -10,36 +10,22 @@ pub struct DependencyAnalysisResult {
     pub has_circular_dependency: bool,
 }
 
-fn find_manifest_id_by_req<'a>(req: &str, manifests: &'a [ModManifest]) -> Option<&'a str> {
-    let clean_req = req.trim().to_lowercase();
-    let sanitized_req = sanitize_mod_id(&clean_req);
-
-    // 1. Pass 1: Exact match on ID or sanitized ID FIRST!
-    if let Some(exact) = manifests.iter().find(|m| {
-        let clean_m = m.id.trim().to_lowercase();
-        let sanitized_m = sanitize_mod_id(&clean_m);
-        clean_m == clean_req || sanitized_m == sanitized_req
-    }) {
-        return Some(&exact.id);
-    }
-
-    // 2. Pass 2: Filter candidates by prefix matching
-    let candidates: Vec<&'a ModManifest> = manifests.iter().filter(|m| {
-        let clean_m = m.id.trim().to_lowercase();
-        let sanitized_m = sanitize_mod_id(&clean_m);
-        sanitized_m.starts_with(&format!("{}_", sanitized_req)) || sanitized_m.starts_with(&format!("{}-", sanitized_req))
-    }).collect();
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Prioritize enabled candidate
-    if let Some(enabled_cand) = candidates.iter().find(|c| c.enabled) {
-        return Some(&enabled_cand.id);
-    }
-
-    Some(&candidates[0].id)
+/// Resolve one `require=` / `loadModAfter=` value to an installed mod's id.
+///
+/// Delegates to [`resolve_requirement_id`], which is shared with the conflict
+/// engine so the two can never disagree about whether a dependency is
+/// satisfied. That shared resolver also understands Steam Workshop ids, which the
+/// previous local implementation ignored entirely — a real
+/// `require=2200148440` used to be unresolvable no matter what was installed.
+///
+/// `exclude_index` is the index of the manifest that owns the requirement, so a
+/// mod can never resolve to itself.
+fn find_manifest_id_by_req<'a>(
+    req: &str,
+    manifests: &'a [ModManifest],
+    exclude_index: Option<usize>,
+) -> Option<&'a str> {
+    resolve_requirement_id(req, manifests, exclude_index)
 }
 
 /// Performs topological sort on mod manifests based on require= directives.
@@ -53,24 +39,22 @@ pub fn sort_dependencies_topologically(manifests: &[ModManifest]) -> DependencyA
         graph.entry(m.id.clone()).or_default();
     }
 
-    for m in manifests {
+    for (i, m) in manifests.iter().enumerate() {
         for req in &m.require {
-            if let Some(target_id) = find_manifest_id_by_req(req, manifests) {
+            if let Some(target_id) = find_manifest_id_by_req(req, manifests, Some(i)) {
                 if target_id != m.id {
                     // target_id (library/framework) must come BEFORE m.id
                     graph.entry(target_id.to_string()).or_default().push(m.id.clone());
                     *in_degree.entry(m.id.clone()).or_insert(0) += 1;
                 }
-            } else {
-                if !missing_deps.contains(req) {
-                    missing_deps.push(req.clone());
-                }
+            } else if !missing_deps.contains(req) {
+                missing_deps.push(req.clone());
             }
         }
 
         // Optional load_mod_after ordering hints (do NOT trigger missing_deps if target is absent!)
         for after in &m.load_mod_after {
-            if let Some(target_id) = find_manifest_id_by_req(after, manifests) {
+            if let Some(target_id) = find_manifest_id_by_req(after, manifests, Some(i)) {
                 if target_id != m.id {
                     graph.entry(target_id.to_string()).or_default().push(m.id.clone());
                     *in_degree.entry(m.id.clone()).or_insert(0) += 1;
